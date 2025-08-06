@@ -12,7 +12,9 @@ from google.generativeai.types import HarmCategory, HarmBlockThreshold
 
 from .logger import setup_logger, log_llm_interaction, logger
 from .utils import analyze_file_structure, get_file_sample_content
-
+from dotenv import load_dotenv
+# Load environment variables
+load_dotenv()
 # Initialize logger (use global logger from logger module)
 # logger = setup_logger()
 
@@ -140,11 +142,29 @@ def create_analysis_prompt(
     Returns:
         Formatted prompt string
     """
+    # Import here to avoid circular imports
+    from .utils import get_all_available_files
+    
+    # Get all available files including any scraped data
+    all_files = get_all_available_files(sandbox_path, file_paths)
+    
     # Get sample content from files
     file_samples = {}
-    for file_path in file_paths[:3]:  # Limit to first 3 files for context
+    for file_path in all_files[:5]:  # Limit to first 5 files for context
         sample = get_file_sample_content(file_path, max_lines=5)
         file_samples[file_path.name] = sample
+    
+    # Check if scraped data files exist
+    scraped_files = [f for f in all_files if 'scraped_data' in f.name]
+    scraped_context = ""
+    if scraped_files:
+        scraped_context = f"""
+
+**PREVIOUSLY SCRAPED DATA AVAILABLE:**
+The following scraped data files are available from previous analysis steps:
+{json.dumps([f.name for f in scraped_files], indent=2)}
+You can use these files directly in your analysis instead of scraping again.
+"""
     
     prompt = f"""
 You are a data analysis expert. Generate Python code to answer the user's question about the uploaded data files.
@@ -157,18 +177,24 @@ You are a data analysis expert. Generate Python code to answer the user's questi
 {json.dumps(file_analysis, indent=2)}
 
 **FILE SAMPLES:**
-{json.dumps(file_samples, indent=2)}
+{json.dumps(file_samples, indent=2)}{scraped_context}
 
 **REQUIREMENTS:**
 1. Write complete, executable Python code
-2. Use only these allowed libraries: pandas, numpy, matplotlib, seaborn, plotly, networkx, scipy, json, csv, base64, pathlib
-3. Read files from the current directory (files are already in the working directory)
-4. Save all results to specific output files:
+2. Use only these allowed libraries: pandas, numpy, matplotlib, seaborn, plotly, networkx, scipy, json, csv, base64, pathlib, requests, beautifulsoup4
+3. If the task involves web scraping or URLs, use requests and beautifulsoup4 to actually scrape the data
+4. Read files from the current directory (files are already in the working directory)
+5. Save all results to specific output files:
    - JSON results: save to 'result.json'
    - Plots: save as PNG files with base64 encoding under 100KB each
    - Text output: use print() statements
-5. Handle errors gracefully with try-except blocks
-6. Include comments explaining the analysis approach
+6. **IMPORTANT for web scraping tasks:** After scraping data from a website, save the scraped data as a file:
+   - Save as CSV if tabular data: 'scraped_data.csv'
+   - Save as JSON if structured data: 'scraped_data.json'
+   - This allows the data to be reused for further analysis steps
+7. Handle errors gracefully with try-except blocks
+8. Include comments explaining the analysis approach
+9. For web scraping tasks, implement proper error handling and retry logic
 
 **OUTPUT FORMAT:**
 Your response should contain only Python code between ```python and ``` markers.
@@ -178,10 +204,13 @@ Your response should contain only Python code between ```python and ``` markers.
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+import requests
+from bs4 import BeautifulSoup
 import json
 import base64
 from pathlib import Path
 from io import BytesIO
+import time
 
 # Set matplotlib to non-interactive backend
 plt.switch_backend('Agg')
@@ -200,6 +229,16 @@ class NumpyEncoder(json.JSONEncoder):
 def main():
     try:
         # Your analysis code here
+        # For web scraping tasks, use requests and BeautifulSoup:
+        # response = requests.get(url, headers={{'User-Agent': 'Mozilla/5.0...'}})
+        # soup = BeautifulSoup(response.content, 'html.parser')
+        
+        # IMPORTANT: If you scrape data, save it to a file for future use:
+        # For tabular data: df.to_csv('scraped_data.csv', index=False)
+        # For structured data: 
+        # with open('scraped_data.json', 'w') as f:
+        #     json.dump(scraped_data, f, cls=NumpyEncoder)
+        
         results = {{"status": "success", "message": "Analysis completed"}}
         
         # Save results using custom encoder
@@ -313,92 +352,9 @@ def extract_code_from_response(response_text: str) -> Optional[str]:
     
     return None
 
-def create_fallback_code(question: str, file_paths: List[Path]) -> str:
-    """
-    Create fallback analysis code when LLM generation fails.
-    
-    Args:
-        question: User's question
-        file_paths: List of file paths
-        
-    Returns:
-        Basic fallback Python code
-    """
-    return f'''
-import pandas as pd
-import numpy as np
-import matplotlib.pyplot as plt
-import json
-from pathlib import Path
 
-plt.switch_backend('Agg')
 
-def main():
-    try:
-        results = {{"status": "fallback", "message": "Using basic analysis"}}
-        
-        # Find CSV files
-        csv_files = [f for f in {[str(p) for p in file_paths]} if f.endswith('.csv')]
-        
-        if csv_files:
-            # Analyze first CSV file
-            df = pd.read_csv(csv_files[0])
-            
-            results["file_info"] = {{
-                "filename": csv_files[0],
-                "shape": df.shape,
-                "columns": list(df.columns),
-                "dtypes": df.dtypes.astype(str).to_dict()
-            }}
-            
-            # Basic statistics
-            if len(df.select_dtypes(include=[np.number]).columns) > 0:
-                results["statistics"] = df.describe().to_dict()
-            
-            # Create a simple plot
-            plt.figure(figsize=(8, 6))
-            if len(df.columns) >= 2:
-                df.plot(kind='scatter', x=df.columns[0], y=df.columns[1])
-            else:
-                df[df.columns[0]].hist()
-            plt.title("Basic Data Visualization")
-            plt.savefig("basic_plot.png", dpi=100, bbox_inches='tight')
-            plt.close()
-            
-        results["question"] = "{question}"
-        
-        with open('result.json', 'w') as f:
-            json.dump(results, f)
-            
-    except Exception as e:
-        error_results = {{"status": "error", "error": str(e)}}
-        with open('result.json', 'w') as f:
-            json.dump(error_results, f)
-        print(f"Error: {{e}}")
 
-if __name__ == "__main__":
-    main()
-'''
-
-async def test_gemini_connection() -> bool:
-    """
-    Test connection to Gemini API.
-    
-    Returns:
-        True if connection successful, False otherwise
-    """
-    if not GEMINI_API_KEY:
-        return False
-    
-    try:
-        model = genai.GenerativeModel(MODEL_NAME)
-        response = await asyncio.to_thread(
-            model.generate_content,
-            "Generate a simple Python print statement that says 'Hello, World!'"
-        )
-        return bool(response and response.text)
-    except Exception:
-        return False
 
 def get_model_info() -> Dict[str, Any]:
     """
@@ -450,16 +406,8 @@ async def generate_code_from_prompt(question_text: str, file_list: list[str]) ->
         generated_code = extract_code_from_response(response.text)
         
         if not generated_code:
-            logger.warning("Could not extract Python code from response, returning raw response")
-            # Strip markdown code blocks if present
-            code = response.text.strip()
-            if code.startswith("```python"):
-                code = code[9:]
-            if code.startswith("```"):
-                code = code[3:]
-            if code.endswith("```"):
-                code = code[:-3]
-            return code.strip()
+            logger.error("Could not extract Python code from response")
+            return ""
         
         logger.info("Successfully generated Python code from prompt")
         return generated_code

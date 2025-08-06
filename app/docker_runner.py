@@ -18,8 +18,9 @@ from .utils import create_code_file, read_execution_results
 # logger = setup_logger()
 
 # Docker configuration
-DOCKER_IMAGE = "python:3.11-slim"
-DOCKER_TIMEOUT = 300  # 5 minutes max execution time
+DOCKER_IMAGE = os.getenv("DOCKER_IMAGE", "python:3.11-slim")
+ANALYSIS_IMAGE = os.getenv("ANALYSIS_DOCKER_IMAGE", "data-analysis-runner:latest")
+DOCKER_TIMEOUT = int(os.getenv("DOCKER_TIMEOUT", 300))  # 5 minutes max execution time
 
 async def execute_code_in_docker(
     code: str,
@@ -47,18 +48,41 @@ async def execute_code_in_docker(
         code_file = create_code_file(code, sandbox_path)
         logger.info(f"Created code file for request {request_id}: {code_file}")
         
-        # Prepare Docker command
+        # Create a simple install and run script that runs as root initially
+        script_content = """#!/bin/bash
+# Install packages as root
+pip install --no-cache-dir --quiet pandas numpy matplotlib seaborn networkx scipy plotly beautifulsoup4 requests duckdb openpyxl
+# Switch to analysis directory and run as specified user
+cd /workspace
+su-exec 1000:1000 python analysis.py
+"""
+        
+        # Since su-exec might not be available, use a simpler approach
+        simple_script = """#!/bin/bash
+pip install --no-cache-dir --quiet pandas numpy matplotlib seaborn networkx scipy plotly beautifulsoup4 requests duckdb openpyxl
+cd /workspace
+python analysis.py
+"""
+        
+        # Create the script file
+        script_file = sandbox_path / "run_analysis.sh"
+        with open(script_file, 'w') as f:
+            f.write(simple_script)
+        
+        # Make script executable
+        os.chmod(script_file, 0o755)
+        
+        # Prepare Docker command - run as root to install packages, then execute
         docker_cmd = [
             "docker", "run",
             "--rm",  # Remove container after execution
-            "--network", "none",  # No network access
             "--memory", "512m",  # Memory limit
             "--cpus", "1.0",  # CPU limit
+            "--name", f"analysis-{request_id[:8]}",  # Name container for easier management
             "-v", f"{sandbox_path.absolute()}:/workspace",  # Mount sandbox as volume
             "-w", "/workspace",  # Set working directory
-            "--user", "1000:1000",  # Run as non-root user
             DOCKER_IMAGE,
-            "python", "analysis.py"
+            "bash", "run_analysis.sh"
         ]
         
         log_docker_operation(logger, request_id, "start")
@@ -78,15 +102,33 @@ async def execute_code_in_docker(
                 timeout=timeout
             )
         except asyncio.TimeoutError:
-            # Kill the process if it times out
+            # Kill the Docker container if it times out
+            container_name = f"analysis-{request_id[:8]}"
             try:
+                # Kill the subprocess first
                 process.kill()
                 await process.wait()
-            except:
-                pass
+                
+                # Try to stop and remove the Docker container
+                await asyncio.create_subprocess_exec(
+                    "docker", "stop", container_name,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL
+                )
+                await asyncio.sleep(1)  # Give it a moment to stop
+                await asyncio.create_subprocess_exec(
+                    "docker", "rm", "-f", container_name,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL
+                )
+            except Exception as cleanup_error:
+                logger.warning(f"Request {request_id}: Error cleaning up container: {cleanup_error}")
             
             execution_time = time.time() - start_time
             log_docker_operation(logger, request_id, "timeout", duration=execution_time)
+            
+            # Check if results were generated even after timeout
+            results = read_execution_results(sandbox_path)
             
             return {
                 "success": False,
@@ -94,7 +136,7 @@ async def execute_code_in_docker(
                 "execution_time": execution_time,
                 "stdout": "",
                 "stderr": f"Process timed out after {timeout} seconds",
-                "results": {}
+                "results": results  # Include any results that were generated
             }
         
         execution_time = time.time() - start_time

@@ -194,6 +194,35 @@ def analyze_file_structure(file_paths: List[Path]) -> Dict[str, Any]:
     
     return analysis
 
+def get_all_available_files(sandbox_path: Path, original_files: List[Path]) -> List[Path]:
+    """
+    Get all files available for analysis, including original files and any scraped data files.
+    
+    Args:
+        sandbox_path: Path to the sandbox directory
+        original_files: List of originally uploaded file paths
+        
+    Returns:
+        List of all available file paths for analysis
+    """
+    all_files = list(original_files)
+    
+    # Check for common scraped data file names
+    scraped_data_files = [
+        'scraped_data.csv',
+        'scraped_data.json',
+        'scraped_data.txt',
+        'scraped_data.xlsx'
+    ]
+    
+    # Add any existing scraped data files in the sandbox to all_files
+    for scraped_file in scraped_data_files:
+        path = sandbox_path / scraped_file
+        if path.exists():
+            all_files.append(path)
+    
+    return all_files
+
 def analyze_single_file(file_path: Path) -> Dict[str, Any]:
     """
     Analyze a single file and extract metadata.
@@ -502,7 +531,6 @@ def validate_generated_code(code: str) -> Tuple[bool, str]:
         'quit(',
         'import socket',
         'import urllib',
-        'import requests',
         'import http',
         'import shutil',
         'rmdir(',
@@ -523,6 +551,11 @@ def validate_generated_code(code: str) -> Tuple[bool, str]:
         'import json',
         'import csv',
         'import base64',
+        'import requests',
+        'from requests',
+        'from bs4',
+        'import beautifulsoup4',
+        'from beautifulsoup4',
         'from pandas',
         'from numpy',
         'from matplotlib',

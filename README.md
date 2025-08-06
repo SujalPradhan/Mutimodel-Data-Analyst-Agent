@@ -66,9 +66,20 @@ docker-compose up --build
 # Install dependencies
 pip install -r requirements.txt
 
-# Run the server
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+# Option 1: Use the Python startup script (recommended)
+python run_server.py
+
+# Option 2: Use the shell script
+./start_server.sh
+
+# Option 3: Use uvicorn directly (development mode with auto-reload)
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8000 --reload-exclude 'sandbox/*' --reload-exclude 'logs/*'
+
+# Option 4: Use uvicorn directly (production mode without auto-reload)  
+uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
+
+**Configuration**: Set `ENABLE_RELOAD=True` in `.env` to enable auto-reload for development.
 
 ### API Usage
 

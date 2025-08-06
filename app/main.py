@@ -9,7 +9,7 @@ import time
 import base64
 from pathlib import Path
 from typing import List, Dict, Any, Optional
-from fastapi import FastAPI, File, UploadFile, HTTPException, status, Form
+from fastapi import FastAPI, File, UploadFile, HTTPException, status, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -78,79 +78,222 @@ async def health_check():
 
 @app.post("/api/")
 async def process_files(
-    question: UploadFile = File(...),
-    files: List[UploadFile] = File(...)
+    request: Request
 ):
     """
-    Phase 2 endpoint for processing files with natural language questions.
+    Main API endpoint for processing files with natural language questions.
     
-    Args:
-        question: Required .txt file containing the natural language question
-        files: One or more additional files (CSV, JSON, HTML, etc.)
+    Expected usage:
+    curl "https://app.example.com/api/" -F "questions.txt=@question.txt" -F "image.png=@image.png" -F "data.csv=@data.csv"
+    
+    The endpoint accepts files with named form fields. questions.txt (or any file ending with question.txt) 
+    will ALWAYS be sent and contain the questions. There may be zero or more additional files passed.
     
     Returns:
-        JSON response with status and UUID
+        JSON response with analysis results including parsed JSON, base64 images, and execution details
     """
     request_uuid = str(uuid.uuid4())
+    start_time = time.time()
     
     try:
+        # Parse the multipart form data
+        form_data = await request.form()
+        
         # Log the incoming request with UUID
         logger.info(f"Request {request_uuid}: Starting file processing")
-        logger.info(f"Request {request_uuid}: Received question file: {question.filename}")
-        logger.info(f"Request {request_uuid}: Received {len(files)} additional files: {[f.filename for f in files]}")
+        logger.info(f"Request {request_uuid}: Received form fields: {list(form_data.keys())}")
         
-        # Validate question file is a .txt file
-        if not question.filename.endswith('.txt'):
-            logger.error(f"Request {request_uuid}: Question file must be .txt, got: {question.filename}")
+        # Extract files from form data
+        files = []
+        for field_name, field_value in form_data.items():
+            if hasattr(field_value, 'filename') and hasattr(field_value, 'read'):
+                # This is a file upload
+                files.append(field_value)
+        
+        logger.info(f"Request {request_uuid}: Found {len(files)} files: {[f.filename for f in files]}")
+        
+        if not files:
+            logger.error(f"Request {request_uuid}: No files found in form data")
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Question file must be a .txt file"
+                detail="No files provided in the request"
             )
+        
+        # Find and validate questions file
+        questions_file = None
+        other_files = []
+        
+        for file in files:
+            filename_lower = file.filename.lower() if file.filename else ""
+            # Check if this is the questions file (named questions.txt or ends with question.txt)
+            if (filename_lower == "questions.txt" or 
+                filename_lower.endswith("question.txt") or
+                "question" in filename_lower and filename_lower.endswith(".txt")):
+                if questions_file is None:
+                    questions_file = file
+                    logger.info(f"Request {request_uuid}: Found questions file: {file.filename}")
+                else:
+                    logger.warning(f"Request {request_uuid}: Multiple question files found, using first one")
+            else:
+                other_files.append(file)
+        
+        # Validate that we have a questions file
+        if questions_file is None:
+            logger.error(f"Request {request_uuid}: No questions.txt file found in uploaded files")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Must include a file named 'questions.txt' or ending with 'question.txt'"
+            )
+        
+        # Validate questions file is a .txt file
+        if not questions_file.filename.lower().endswith('.txt'):
+            logger.error(f"Request {request_uuid}: Questions file must be .txt, got: {questions_file.filename}")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Questions file must be a .txt file"
+            )
+        
+        # Validate other file types
+        for file in other_files:
+            if not validate_file_type(file.filename):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Unsupported file type: {file.filename}"
+                )
         
         # Create sandbox directory for this request
         sandbox_path = SANDBOX_DIR / request_uuid
         sandbox_path.mkdir(parents=True, exist_ok=True)
         logger.info(f"Request {request_uuid}: Created sandbox directory: {sandbox_path}")
         
-        # Save question file
+        # Save questions file
         question_path = sandbox_path / "question.txt"
         with open(question_path, "wb") as buffer:
-            content = await question.read()
+            content = await questions_file.read()
             buffer.write(content)
-        logger.info(f"Request {request_uuid}: Saved question file to {question_path}")
+        logger.info(f"Request {request_uuid}: Saved questions file to {question_path}")
         
-        # Save additional files
-        saved_files = []
-        for file in files:
+        # Read question content
+        try:
+            with open(question_path, "r", encoding="utf-8") as f:
+                question_content = f.read().strip()
+        except UnicodeDecodeError:
+            # Try with different encoding
+            with open(question_path, "r", encoding="latin-1") as f:
+                question_content = f.read().strip()
+        
+        if not question_content:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Questions file cannot be empty"
+            )
+        
+        logger.info(f"Request {request_uuid}: Question content preview: {question_content[:200]}...")
+        
+        # Save other files
+        file_paths = [question_path]  # Start with questions file
+        for file in other_files:
             file_path = sandbox_path / file.filename
             with open(file_path, "wb") as buffer:
                 content = await file.read()
                 buffer.write(content)
-            saved_files.append(file.filename)
+            file_paths.append(file_path)
             logger.info(f"Request {request_uuid}: Saved file: {file.filename}")
         
-        # Read and print preview of question.txt file
-        with open(question_path, "r", encoding="utf-8") as f:
-            question_content = f.read()
+        # Analyze file structure for LLM context (includes scraped data if available)
+        from .utils import get_all_available_files
+        all_available_files = get_all_available_files(sandbox_path, file_paths)
+        file_analysis = analyze_file_structure(all_available_files)
+        logger.info(f"Request {request_uuid}: Analyzed file structure (including any scraped data)")
         
-        logger.info(f"Request {request_uuid}: Question content preview: {question_content[:200]}...")
-        print(f"Question preview for {request_uuid}: {question_content[:200]}...")
+        # Generate analysis code using LLM
+        logger.info(f"Request {request_uuid}: Generating analysis code with LLM")
+        generated_code = await generate_analysis_code(
+            question=question_content,
+            file_paths=all_available_files,
+            analysis_type="general",  # Default analysis type
+            sandbox_path=sandbox_path,
+            request_id=request_uuid
+        )
         
-        logger.info(f"Request {request_uuid}: Successfully processed all files")
+        if not generated_code:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to generate analysis code"
+            )
         
-        # Return placeholder JSON response
-        return JSONResponse(content={
-            "status": "ok",
-            "uuid": request_uuid
-        })
+        logger.info(f"Request {request_uuid}: Successfully generated analysis code")
+        
+        # Determine timeout based on task complexity
+        timeout = 60  # Default timeout
+        if any(keyword in question_content.lower() for keyword in ['scrape', 'web', 'url', 'wikipedia', 'http']):
+            timeout = 120  # Extended timeout for web scraping tasks
+            logger.info(f"Request {request_uuid}: Detected web scraping task, using extended timeout of {timeout}s")
+        
+        # Execute the generated code in Docker
+        logger.info(f"Request {request_uuid}: Executing code in Docker container")
+        execution_result = await execute_code_in_docker(
+            code=generated_code,
+            sandbox_path=sandbox_path,
+            request_id=request_uuid,
+            timeout=timeout
+        )
+        
+        # Process outputs from sandbox
+        response_data = await process_execution_outputs(
+            sandbox_path=sandbox_path,
+            execution_result=execution_result,
+            request_id=request_uuid
+        )
+        
+        # Calculate total execution time
+        total_time = time.time() - start_time
+        
+        # Build final response
+        final_response = {
+            "request_id": request_uuid,
+            "status": "success" if execution_result.get("success", False) else "error",
+            "question": question_content,
+            "analysis_type": "general",
+            "files_processed": len(file_paths),
+            "execution_time": total_time,
+            "docker_execution_time": execution_result.get("execution_time", 0),
+            "results": response_data
+        }
+        
+        # Add error information if execution failed
+        if not execution_result.get("success", False):
+            final_response["error"] = execution_result.get("error", "Unknown execution error")
+            final_response["stderr"] = execution_result.get("stderr", "")
+        
+        # Validate response structure before returning
+        validated_response = validate_response_structure(final_response)
+        
+        logger.info(f"Request {request_uuid}: Analysis completed successfully in {total_time:.2f}s")
+        
+        return JSONResponse(content=validated_response)
         
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Request {request_uuid}: Unexpected error - {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Internal server error: {str(e)}"
+        error_time = time.time() - start_time
+        logger.error(f"Request {request_uuid}: Unexpected error after {error_time:.2f}s - {str(e)}")
+        
+        # Return structured error response
+        error_response = {
+            "request_id": request_uuid,
+            "status": "error",
+            "question": question_content if 'question_content' in locals() else "Unknown",
+            "analysis_type": "general",
+            "files_processed": 0,
+            "execution_time": error_time,
+            "error": f"Server error: {str(e)}",
+            "results": {}
+        }
+        
+        return JSONResponse(
+            content=error_response,
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
 
 @app.get("/api/status/{request_id}")
@@ -221,15 +364,17 @@ async def analyze_files(
         file_paths = await save_uploaded_files(files, sandbox_path)
         logger.info(f"Request {request_id}: Saved {len(file_paths)} files to sandbox")
         
-        # Analyze file structure for LLM context
-        file_analysis = analyze_file_structure(file_paths)
-        logger.info(f"Request {request_id}: Analyzed file structure")
+        # Analyze file structure for LLM context (includes scraped data if available)
+        from .utils import get_all_available_files
+        all_available_files = get_all_available_files(sandbox_path, file_paths)
+        file_analysis = analyze_file_structure(all_available_files)
+        logger.info(f"Request {request_id}: Analyzed file structure (including any scraped data)")
         
         # Generate analysis code using LLM
         logger.info(f"Request {request_id}: Generating analysis code with LLM")
         generated_code = await generate_analysis_code(
             question=question,
-            file_paths=file_paths,
+            file_paths=all_available_files,
             analysis_type=analysis_type,
             sandbox_path=sandbox_path,
             request_id=request_id
