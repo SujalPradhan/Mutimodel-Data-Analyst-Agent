@@ -182,19 +182,20 @@ You are a data analysis expert. Generate Python code to answer the user's questi
 **REQUIREMENTS:**
 1. Write complete, executable Python code
 2. Use only these allowed libraries: pandas, numpy, matplotlib, seaborn, plotly, networkx, scipy, json, csv, base64, pathlib, requests, beautifulsoup4
-3. If the task involves web scraping or URLs, use requests and beautifulsoup4 to actually scrape the data
+3. If files named 'scraped_data.csv', 'scraped_data.html' or 'scraped_data.json' exist in the working directory, load data directly from these files instead of performing web scraping. Only perform web scraping using requests and BeautifulSoup when no pre-scraped data file is available.
 4. Read files from the current directory (files are already in the working directory)
 5. Save all results to specific output files:
    - JSON results: save to 'result.json'
    - Plots: save as PNG files with base64 encoding under 100KB each
    - Text output: use print() statements
-6. **IMPORTANT for web scraping tasks:** After scraping data from a website, save the scraped data as a file:
+6. **IMPORTANT for web scraping tasks when pre-scraped data is not available:** After scraping data from a website, save the scraped data as a file:
    - Save as CSV if tabular data: 'scraped_data.csv'
    - Save as JSON if structured data: 'scraped_data.json'
    - This allows the data to be reused for further analysis steps
 7. Handle errors gracefully with try-except blocks
 8. Include comments explaining the analysis approach
 9. For web scraping tasks, implement proper error handling and retry logic
+10. **HTML ANALYSIS REQUIREMENT:** When performing web scraping, first analyze the entire HTML document structure to understand the page layout. Use soup.prettify()[:2000] or similar to examine the HTML structure, identify all available tables, sections, and data containers before selecting the target elements. This ensures robust element selection and fallback strategies.
 
 **OUTPUT FORMAT:**
 Your response should contain only Python code between ```python and ``` markers.
@@ -232,6 +233,21 @@ def main():
         # For web scraping tasks, use requests and BeautifulSoup:
         # response = requests.get(url, headers={{'User-Agent': 'Mozilla/5.0...'}})
         # soup = BeautifulSoup(response.content, 'html.parser')
+        
+        # STEP 1: Analyze HTML structure when scraping
+        # print("HTML Structure Analysis:")
+        # print(soup.prettify()[:2000])  # Print first 2000 chars of HTML
+        # 
+        # # Find all tables and examine their structure
+        # all_tables = soup.find_all('table')
+        # print(f"Found {{len(all_tables)}} tables on the page")
+        # for i, table in enumerate(all_tables):
+        #     table_classes = table.get('class', [])
+        #     print(f"Table {{i}}: classes={{table_classes}}")
+        #     # Check for captions, headers, etc.
+        #     caption = table.find('caption')
+        #     if caption:
+        #         print(f"  Caption: {{caption.get_text(strip=True)[:100]}}...")
         
         # IMPORTANT: If you scrape data, save it to a file for future use:
         # For tabular data: df.to_csv('scraped_data.csv', index=False)
@@ -300,6 +316,7 @@ def get_analysis_type_guidance(analysis_type: str) -> str:
 - Create appropriate visualizations
 - Identify patterns and insights
 - Provide summary statistics
+- **For web scraping tasks:** First analyze the complete HTML structure using soup.prettify() to understand page layout, then identify all available data containers (tables, divs, etc.) before selecting target elements. Implement robust fallback strategies in case primary selectors fail.
         """
     }
     

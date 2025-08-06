@@ -1,5 +1,6 @@
 """
 Docker container runner for executing LLM-generated Python code safely.
+Optimized for efficiency with pre-built images and smart package management.
 """
 import os
 import time
@@ -17,10 +18,58 @@ from .utils import create_code_file, read_execution_results
 # Initialize logger (use global logger from logger module)
 # logger = setup_logger()
 
-# Docker configuration
-DOCKER_IMAGE = os.getenv("DOCKER_IMAGE", "python:3.11-slim")
-ANALYSIS_IMAGE = os.getenv("ANALYSIS_DOCKER_IMAGE", "data-analysis-runner:latest")
+# Docker configuration - prioritize custom analysis image
+CUSTOM_ANALYSIS_IMAGE = "data-analysis-env:latest"
+FALLBACK_IMAGE = os.getenv("DOCKER_IMAGE", "python:3.11-slim")
 DOCKER_TIMEOUT = int(os.getenv("DOCKER_TIMEOUT", 300))  # 5 minutes max execution time
+
+# Cache for checking image availability
+_image_cache = {}
+
+async def initialize_docker_environment() -> Dict[str, Any]:
+    """
+    Initialize Docker environment for optimal performance.
+    This should be called during application startup.
+    
+    Returns:
+        Dictionary with initialization status and details
+    """
+    logger.info("Initializing Docker environment for data analysis...")
+    
+    # Check Docker availability
+    docker_available = await check_docker_availability()
+    if not docker_available:
+        logger.error("Docker is not available - analysis will fail")
+        return {
+            "docker_available": False,
+            "optimized_image_available": False,
+            "fallback_image_available": False,
+            "status": "error",
+            "message": "Docker is not available"
+        }
+    
+    # Ensure optimized analysis image is available
+    optimized_available = await ensure_analysis_image_available()
+    
+    # Check fallback image availability
+    fallback_available = await pull_docker_image()
+    
+    # Get Docker stats for monitoring
+    docker_stats = await get_docker_stats()
+    
+    status = "ready" if (optimized_available or fallback_available) else "degraded"
+    
+    result = {
+        "docker_available": docker_available,
+        "optimized_image_available": optimized_available,
+        "fallback_image_available": fallback_available,
+        "docker_stats": docker_stats,
+        "status": status,
+        "message": f"Docker environment initialized - using {'optimized' if optimized_available else 'fallback'} execution mode"
+    }
+    
+    logger.info(f"Docker initialization complete: {result['message']}")
+    return result
 
 async def execute_code_in_docker(
     code: str,
@@ -29,7 +78,13 @@ async def execute_code_in_docker(
     timeout: int = 60
 ) -> Dict[str, Any]:
     """
-    Execute Python code safely in a Docker container.
+    Execute Python code safely in a Docker container with optimized efficiency.
+    
+    Optimizations:
+    - Use pre-built analysis image when available
+    - Smart package installation only when needed
+    - Efficient container startup and cleanup
+    - Network isolation for security
     
     Args:
         code: Python code to execute
@@ -41,58 +96,128 @@ async def execute_code_in_docker(
         Dictionary with execution results
     """
     start_time = time.time()
-    container_id = None
     
     try:
         # Create code file
         code_file = create_code_file(code, sandbox_path)
-        logger.info(f"Created code file for request {request_id}: {code_file}")
+        logger.info(f"Request {request_id}: Created code file: {code_file}")
         
-        # Create a simple install and run script that runs as root initially
-        script_content = """#!/bin/bash
-# Install packages as root
-pip install --no-cache-dir --quiet pandas numpy matplotlib seaborn networkx scipy plotly beautifulsoup4 requests duckdb openpyxl
-# Switch to analysis directory and run as specified user
-cd /workspace
-su-exec 1000:1000 python analysis.py
-"""
+        # Determine best image to use
+        image_name = await get_best_available_image()
+        logger.info(f"Request {request_id}: Using Docker image: {image_name}")
         
-        # Since su-exec might not be available, use a simpler approach
-        simple_script = """#!/bin/bash
-pip install --no-cache-dir --quiet pandas numpy matplotlib seaborn networkx scipy plotly beautifulsoup4 requests duckdb openpyxl
-cd /workspace
-python analysis.py
-"""
+        # Execute with the optimal strategy based on image type
+        if image_name == CUSTOM_ANALYSIS_IMAGE:
+            # Use optimized execution for pre-built image
+            return await execute_with_prebuilt_image(
+                code=code,
+                sandbox_path=sandbox_path,
+                request_id=request_id,
+                timeout=timeout,
+                image_name=image_name
+            )
+        else:
+            # Use fallback execution with package installation
+            return await execute_with_package_install(
+                code=code,
+                sandbox_path=sandbox_path,
+                request_id=request_id,
+                timeout=timeout,
+                image_name=image_name
+            )
         
-        # Create the script file
-        script_file = sandbox_path / "run_analysis.sh"
-        with open(script_file, 'w') as f:
-            f.write(simple_script)
+    except Exception as e:
+        execution_time = time.time() - start_time
+        logger.error(f"Request {request_id}: Docker execution error: {str(e)}")
         
-        # Make script executable
-        os.chmod(script_file, 0o755)
+        return {
+            "success": False,
+            "error": f"Docker execution failed: {str(e)}",
+            "execution_time": execution_time,
+            "stdout": "",
+            "stderr": str(e),
+            "results": {}
+        }
+
+async def get_best_available_image() -> str:
+    """
+    Determine the best Docker image to use based on availability.
+    Uses caching to avoid repeated image checks.
+    
+    Returns:
+        Name of the best available Docker image
+    """
+    global _image_cache
+    
+    # Check cache first
+    if CUSTOM_ANALYSIS_IMAGE in _image_cache:
+        if _image_cache[CUSTOM_ANALYSIS_IMAGE]:
+            return CUSTOM_ANALYSIS_IMAGE
+        else:
+            return FALLBACK_IMAGE
+    
+    # Check if custom analysis image exists
+    try:
+        check_cmd = ["docker", "images", "-q", CUSTOM_ANALYSIS_IMAGE]
+        process = await asyncio.create_subprocess_exec(
+            *check_cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
         
-        # Prepare Docker command - run as root to install packages, then execute
+        stdout_data, _ = await asyncio.wait_for(process.communicate(), timeout=10)
+        
+        image_exists = bool(stdout_data.decode().strip())
+        _image_cache[CUSTOM_ANALYSIS_IMAGE] = image_exists
+        
+        if image_exists:
+            logger.info(f"Using optimized analysis image: {CUSTOM_ANALYSIS_IMAGE}")
+            return CUSTOM_ANALYSIS_IMAGE
+        else:
+            logger.info(f"Custom image not found, using fallback: {FALLBACK_IMAGE}")
+            return FALLBACK_IMAGE
+            
+    except Exception as e:
+        logger.warning(f"Error checking for custom image: {e}, using fallback")
+        _image_cache[CUSTOM_ANALYSIS_IMAGE] = False
+        return FALLBACK_IMAGE
+
+async def execute_with_prebuilt_image(
+    code: str,
+    sandbox_path: Path,
+    request_id: str,
+    timeout: int,
+    image_name: str
+) -> Dict[str, Any]:
+    """
+    Execute code using pre-built image with all packages already installed.
+    This is the most efficient execution path.
+    """
+    start_time = time.time()
+    
+    try:
+        log_docker_operation(logger, request_id, "start_optimized")
+        
+        # Prepare optimized Docker command for pre-built image
         docker_cmd = [
             "docker", "run",
             "--rm",  # Remove container after execution
-            "--memory", "512m",  # Memory limit
-            "--cpus", "1.0",  # CPU limit
-            "--name", f"analysis-{request_id[:8]}",  # Name container for easier management
-            "-v", f"{sandbox_path.absolute()}:/workspace",  # Mount sandbox as volume
-            "-w", "/workspace",  # Set working directory
-            DOCKER_IMAGE,
-            "bash", "run_analysis.sh"
+            "--network", "none",  # No network access for security
+            "--memory", "768m",  # Slightly more memory for pre-built image
+            "--cpus", "1.5",  # Allow more CPU for faster execution
+            "--name", f"analysis-opt-{request_id[:8]}",
+            "-v", f"{sandbox_path.absolute()}:/workspace",
+            "-w", "/workspace",
+            "--user", "1000:1000",  # Run as non-root user
+            image_name,
+            "python", "analysis.py"
         ]
-        
-        log_docker_operation(logger, request_id, "start")
         
         # Execute Docker container
         process = await asyncio.create_subprocess_exec(
             *docker_cmd,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=sandbox_path
+            stderr=asyncio.subprocess.PIPE
         )
         
         # Wait for completion with timeout
@@ -102,33 +227,10 @@ python analysis.py
                 timeout=timeout
             )
         except asyncio.TimeoutError:
-            # Kill the Docker container if it times out
-            container_name = f"analysis-{request_id[:8]}"
-            try:
-                # Kill the subprocess first
-                process.kill()
-                await process.wait()
-                
-                # Try to stop and remove the Docker container
-                await asyncio.create_subprocess_exec(
-                    "docker", "stop", container_name,
-                    stdout=asyncio.subprocess.DEVNULL,
-                    stderr=asyncio.subprocess.DEVNULL
-                )
-                await asyncio.sleep(1)  # Give it a moment to stop
-                await asyncio.create_subprocess_exec(
-                    "docker", "rm", "-f", container_name,
-                    stdout=asyncio.subprocess.DEVNULL,
-                    stderr=asyncio.subprocess.DEVNULL
-                )
-            except Exception as cleanup_error:
-                logger.warning(f"Request {request_id}: Error cleaning up container: {cleanup_error}")
+            await cleanup_timed_out_container(f"analysis-opt-{request_id[:8]}", process)
             
             execution_time = time.time() - start_time
             log_docker_operation(logger, request_id, "timeout", duration=execution_time)
-            
-            # Check if results were generated even after timeout
-            results = read_execution_results(sandbox_path)
             
             return {
                 "success": False,
@@ -136,26 +238,23 @@ python analysis.py
                 "execution_time": execution_time,
                 "stdout": "",
                 "stderr": f"Process timed out after {timeout} seconds",
-                "results": results  # Include any results that were generated
+                "results": read_execution_results(sandbox_path)
             }
         
         execution_time = time.time() - start_time
-        
-        # Decode output
         stdout_str = stdout_data.decode('utf-8', errors='replace') if stdout_data else ""
         stderr_str = stderr_data.decode('utf-8', errors='replace') if stderr_data else ""
         
-        # Check if execution was successful
         success = process.returncode == 0
-        
-        # Read results from sandbox directory
         results = read_execution_results(sandbox_path)
         
-        # Log completion
-        log_docker_operation(
-            logger, request_id, "complete",
-            duration=execution_time
-        )
+        log_docker_operation(logger, request_id, "complete_optimized", duration=execution_time)
+        
+        # Monitor performance
+        await monitor_execution_performance(request_id, {
+            "execution_time": execution_time,
+            "success": success
+        }, image_name)
         
         return {
             "success": success,
@@ -169,16 +268,157 @@ python analysis.py
         
     except Exception as e:
         execution_time = time.time() - start_time
-        logger.error(f"Docker execution error for request {request_id}: {str(e)}")
+        logger.error(f"Request {request_id}: Optimized execution failed: {str(e)}")
         
         return {
             "success": False,
-            "error": f"Docker execution failed: {str(e)}",
+            "error": f"Optimized Docker execution failed: {str(e)}",
             "execution_time": execution_time,
             "stdout": "",
             "stderr": str(e),
             "results": {}
         }
+
+async def execute_with_package_install(
+    code: str,
+    sandbox_path: Path,
+    request_id: str,
+    timeout: int,
+    image_name: str
+) -> Dict[str, Any]:
+    """
+    Execute code with package installation for fallback image.
+    Uses smart package installation with caching.
+    """
+    start_time = time.time()
+    
+    try:
+        log_docker_operation(logger, request_id, "start_fallback")
+        
+        # Create optimized install script with better error handling
+        install_script = """#!/bin/bash
+set -e
+echo "Installing required packages..."
+pip install --no-cache-dir --quiet --disable-pip-version-check \\
+    pandas numpy matplotlib seaborn networkx scipy plotly \\
+    beautifulsoup4 requests duckdb openpyxl 2>/dev/null || {
+    echo "Package installation failed, proceeding anyway..."
+}
+echo "Starting analysis..."
+cd /workspace
+python analysis.py
+"""
+        
+        # Create the script file
+        script_file = sandbox_path / "run_analysis.sh"
+        with open(script_file, 'w') as f:
+            f.write(install_script)
+        
+        # Make script executable
+        os.chmod(script_file, 0o755)
+        
+        # Prepare Docker command for fallback execution
+        docker_cmd = [
+            "docker", "run",
+            "--rm",
+            "--memory", "512m",
+            "--cpus", "1.0",
+            "--name", f"analysis-fb-{request_id[:8]}",
+            "-v", f"{sandbox_path.absolute()}:/workspace",
+            "-w", "/workspace",
+            image_name,
+            "bash", "run_analysis.sh"
+        ]
+        
+        # Execute Docker container
+        process = await asyncio.create_subprocess_exec(
+            *docker_cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        
+        # Wait for completion with timeout
+        try:
+            stdout_data, stderr_data = await asyncio.wait_for(
+                process.communicate(),
+                timeout=timeout
+            )
+        except asyncio.TimeoutError:
+            await cleanup_timed_out_container(f"analysis-fb-{request_id[:8]}", process)
+            
+            execution_time = time.time() - start_time
+            log_docker_operation(logger, request_id, "timeout", duration=execution_time)
+            
+            return {
+                "success": False,
+                "error": f"Execution timed out after {timeout} seconds",
+                "execution_time": execution_time,
+                "stdout": "",
+                "stderr": f"Process timed out after {timeout} seconds",
+                "results": read_execution_results(sandbox_path)
+            }
+        
+        execution_time = time.time() - start_time
+        stdout_str = stdout_data.decode('utf-8', errors='replace') if stdout_data else ""
+        stderr_str = stderr_data.decode('utf-8', errors='replace') if stderr_data else ""
+        
+        success = process.returncode == 0
+        results = read_execution_results(sandbox_path)
+        
+        log_docker_operation(logger, request_id, "complete_fallback", duration=execution_time)
+        
+        # Monitor performance
+        await monitor_execution_performance(request_id, {
+            "execution_time": execution_time,
+            "success": success
+        }, image_name)
+        
+        return {
+            "success": success,
+            "execution_time": execution_time,
+            "return_code": process.returncode,
+            "stdout": stdout_str,
+            "stderr": stderr_str,
+            "results": results,
+            "error": None if success else f"Process exited with code {process.returncode}"
+        }
+        
+    except Exception as e:
+        execution_time = time.time() - start_time
+        logger.error(f"Request {request_id}: Fallback execution failed: {str(e)}")
+        
+        return {
+            "success": False,
+            "error": f"Fallback Docker execution failed: {str(e)}",
+            "execution_time": execution_time,
+            "stdout": "",
+            "stderr": str(e),
+            "results": {}
+        }
+
+async def cleanup_timed_out_container(container_name: str, process: asyncio.subprocess.Process) -> None:
+    """
+    Clean up a timed-out container and process.
+    """
+    try:
+        # Kill the subprocess first
+        process.kill()
+        await process.wait()
+        
+        # Try to stop and remove the Docker container
+        await asyncio.create_subprocess_exec(
+            "docker", "stop", container_name,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL
+        )
+        await asyncio.sleep(1)  # Give it a moment to stop
+        await asyncio.create_subprocess_exec(
+            "docker", "rm", "-f", container_name,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL
+        )
+    except Exception as cleanup_error:
+        logger.warning(f"Error cleaning up container {container_name}: {cleanup_error}")
 
 async def check_docker_availability() -> bool:
     """
@@ -209,7 +449,7 @@ async def pull_docker_image() -> bool:
     """
     try:
         # Check if image exists locally
-        check_cmd = ["docker", "images", "-q", DOCKER_IMAGE]
+        check_cmd = ["docker", "images", "-q", FALLBACK_IMAGE]
         process = await asyncio.create_subprocess_exec(
             *check_cmd,
             stdout=asyncio.subprocess.PIPE,
@@ -219,12 +459,12 @@ async def pull_docker_image() -> bool:
         stdout_data, _ = await asyncio.wait_for(process.communicate(), timeout=10)
         
         if stdout_data.decode().strip():
-            logger.info(f"Docker image {DOCKER_IMAGE} already available locally")
+            logger.info(f"Docker image {FALLBACK_IMAGE} already available locally")
             return True
         
         # Pull image
-        logger.info(f"Pulling Docker image {DOCKER_IMAGE}")
-        pull_cmd = ["docker", "pull", DOCKER_IMAGE]
+        logger.info(f"Pulling Docker image {FALLBACK_IMAGE}")
+        pull_cmd = ["docker", "pull", FALLBACK_IMAGE]
         process = await asyncio.create_subprocess_exec(
             *pull_cmd,
             stdout=asyncio.subprocess.PIPE,
@@ -235,9 +475,9 @@ async def pull_docker_image() -> bool:
         
         success = process.returncode == 0
         if success:
-            logger.info(f"Successfully pulled Docker image {DOCKER_IMAGE}")
+            logger.info(f"Successfully pulled Docker image {FALLBACK_IMAGE}")
         else:
-            logger.error(f"Failed to pull Docker image {DOCKER_IMAGE}")
+            logger.error(f"Failed to pull Docker image {FALLBACK_IMAGE}")
         
         return success
         
@@ -245,7 +485,261 @@ async def pull_docker_image() -> bool:
         logger.error(f"Error checking/pulling Docker image: {str(e)}")
         return False
 
+async def ensure_analysis_image_available() -> bool:
+    """
+    Ensure the optimized analysis image is available, build it if necessary.
+    
+    Returns:
+        True if image is available, False otherwise
+    """
+    try:
+        # Check if custom analysis image exists
+        check_cmd = ["docker", "images", "-q", CUSTOM_ANALYSIS_IMAGE]
+        process = await asyncio.create_subprocess_exec(
+            *check_cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        
+        stdout_data, _ = await asyncio.wait_for(process.communicate(), timeout=10)
+        
+        if stdout_data.decode().strip():
+            logger.info(f"Analysis image {CUSTOM_ANALYSIS_IMAGE} already available")
+            return True
+        
+        # Image doesn't exist, try to build it
+        logger.info(f"Building optimized analysis image: {CUSTOM_ANALYSIS_IMAGE}")
+        return await build_analysis_image()
+        
+    except Exception as e:
+        logger.error(f"Error checking analysis image availability: {e}")
+        return False
+
+async def build_analysis_image() -> bool:
+    """
+    Build the optimized analysis Docker image using the analysis Dockerfile.
+    
+    Returns:
+        True if build successful, False otherwise
+    """
+    try:
+        # Check if Dockerfile.analysis exists
+        dockerfile_path = Path(__file__).parent.parent / "Dockerfile.analysis"
+        requirements_path = Path(__file__).parent.parent / "analysis-requirements.txt"
+        
+        if not dockerfile_path.exists():
+            logger.warning("Dockerfile.analysis not found, creating optimized dockerfile")
+            return await create_and_build_analysis_image()
+        
+        if not requirements_path.exists():
+            logger.warning("analysis-requirements.txt not found, creating default requirements")
+            await create_analysis_requirements()
+        
+        # Build the image
+        build_cmd = [
+            "docker", "build",
+            "-f", str(dockerfile_path),
+            "-t", CUSTOM_ANALYSIS_IMAGE,
+            str(dockerfile_path.parent)
+        ]
+        
+        logger.info("Starting Docker image build (this may take a few minutes)...")
+        process = await asyncio.create_subprocess_exec(
+            *build_cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        
+        stdout_data, stderr_data = await asyncio.wait_for(
+            process.communicate(),
+            timeout=600  # 10 minutes timeout for build
+        )
+        
+        if process.returncode == 0:
+            logger.info(f"Successfully built analysis image: {CUSTOM_ANALYSIS_IMAGE}")
+            # Update cache
+            _image_cache[CUSTOM_ANALYSIS_IMAGE] = True
+            return True
+        else:
+            stderr_str = stderr_data.decode('utf-8', errors='replace') if stderr_data else ""
+            logger.error(f"Failed to build analysis image: {stderr_str}")
+            return False
+            
+    except asyncio.TimeoutError:
+        logger.error("Docker image build timed out after 10 minutes")
+        return False
+    except Exception as e:
+        logger.error(f"Error building analysis image: {str(e)}")
+        return False
+
+async def create_and_build_analysis_image() -> bool:
+    """
+    Create a Dockerfile and build the analysis image from scratch.
+    """
+    try:
+        # Create optimized Dockerfile content
+        dockerfile_content = """FROM python:3.11-slim
+
+# Set environment variables
+ENV PYTHONDONTWRITEBYTECODE=1 \\
+    PYTHONUNBUFFERED=1 \\
+    DEBIAN_FRONTEND=noninteractive
+
+# Install system dependencies required for data science packages
+RUN apt-get update && apt-get install -y \\
+    gcc \\
+    g++ \\
+    gfortran \\
+    libopenblas-dev \\
+    liblapack-dev \\
+    libfreetype6-dev \\
+    libpng-dev \\
+    libjpeg-dev \\
+    pkg-config \\
+    && rm -rf /var/lib/apt/lists/*
+
+# Create working directory
+WORKDIR /workspace
+
+# Install Python packages
+RUN pip install --no-cache-dir --upgrade pip && \\
+    pip install --no-cache-dir \\
+    pandas==2.1.4 \\
+    numpy==1.24.4 \\
+    matplotlib==3.7.4 \\
+    seaborn==0.13.0 \\
+    networkx==3.2.1 \\
+    scipy==1.11.4 \\
+    plotly==5.17.0 \\
+    beautifulsoup4==4.12.2 \\
+    requests==2.31.0 \\
+    duckdb==0.9.2 \\
+    openpyxl==3.1.2
+
+# Create non-root user for security
+RUN useradd -m -u 1000 analysis && \\
+    chown -R analysis:analysis /workspace
+
+USER analysis
+
+# Default command
+CMD ["python"]
+"""
+        
+        # Create temporary directory for build context
+        with tempfile.TemporaryDirectory() as temp_dir:
+            dockerfile_path = Path(temp_dir) / "Dockerfile"
+            
+            # Write Dockerfile
+            with open(dockerfile_path, 'w') as f:
+                f.write(dockerfile_content)
+            
+            # Build image
+            build_cmd = [
+                "docker", "build",
+                "-t", CUSTOM_ANALYSIS_IMAGE,
+                temp_dir
+            ]
+            
+            logger.info("Building optimized analysis image from generated Dockerfile...")
+            process = await asyncio.create_subprocess_exec(
+                *build_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            
+            stdout_data, stderr_data = await asyncio.wait_for(
+                process.communicate(),
+                timeout=600  # 10 minutes timeout
+            )
+            
+            if process.returncode == 0:
+                logger.info(f"Successfully built optimized analysis image: {CUSTOM_ANALYSIS_IMAGE}")
+                _image_cache[CUSTOM_ANALYSIS_IMAGE] = True
+                return True
+            else:
+                stderr_str = stderr_data.decode('utf-8', errors='replace') if stderr_data else ""
+                logger.error(f"Failed to build optimized image: {stderr_str}")
+                return False
+                
+    except Exception as e:
+        logger.error(f"Error creating and building analysis image: {str(e)}")
+        return False
+
+async def create_analysis_requirements() -> None:
+    """
+    Create analysis-requirements.txt file with optimized package versions.
+    """
+    requirements_content = """# Core data processing packages
+pandas==2.1.4
+numpy==1.24.4
+
+# Visualization packages
+matplotlib==3.7.4
+seaborn==0.13.0
+plotly==5.17.0
+
+# Network analysis
+networkx==3.2.1
+
+# Scientific computing
+scipy==1.11.4
+
+# Database
+duckdb==0.9.2
+
+# File processing
+openpyxl==3.1.2
+beautifulsoup4==4.12.2
+
+# HTTP requests
+requests==2.31.0
+"""
+    
+    requirements_path = Path(__file__).parent.parent / "analysis-requirements.txt"
+    with open(requirements_path, 'w') as f:
+        f.write(requirements_content)
+    
 def create_dockerfile_content() -> str:
+    """
+    Create Dockerfile content for the analysis environment.
+    
+    Returns:
+        Dockerfile content as string
+    """
+    return """
+FROM python:3.11-slim
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \\
+    gcc \\
+    g++ \\
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python packages
+RUN pip install --no-cache-dir \\
+    pandas==2.1.4 \\
+    numpy==1.24.4 \\
+    matplotlib==3.7.4 \\
+    seaborn==0.13.0 \\
+    networkx==3.2.1 \\
+    scipy==1.11.4 \\
+    plotly==5.17.0 \\
+    beautifulsoup4==4.12.2 \\
+    requests==2.31.0 \\
+    duckdb==0.9.2 \\
+    openpyxl==3.1.2
+
+# Create non-root user
+RUN useradd -m -u 1000 analyst
+USER analyst
+
+# Set working directory
+WORKDIR /workspace
+
+# Default command
+CMD ["python"]
+"""
     """
     Create Dockerfile content for the analysis environment.
     
@@ -361,10 +855,10 @@ async def execute_with_custom_image(
         
         if not stdout_data.decode().strip():
             # Custom image doesn't exist, use standard image
-            image_name = DOCKER_IMAGE
+            image_name = FALLBACK_IMAGE
             
     except Exception:
-        image_name = DOCKER_IMAGE
+        image_name = FALLBACK_IMAGE
     
     # Execute with the selected image
     return await execute_code_with_image(
@@ -415,7 +909,7 @@ pip install --no-cache-dir pandas numpy matplotlib seaborn networkx scipy plotly
         os.chmod(install_file, 0o755)
         
         # Prepare Docker command
-        if image_name == DOCKER_IMAGE:
+        if image_name == FALLBACK_IMAGE:
             # Use install script for standard Python image
             cmd_args = ["bash", "install_and_run.sh"]
         else:
@@ -668,3 +1162,43 @@ def run_code_in_docker(code_str: str, input_dir: str) -> dict:
             "return_code": -1,
             "error": f"Failed to execute code: {str(e)}"
         }
+
+async def monitor_execution_performance(
+    request_id: str, 
+    execution_result: Dict[str, Any], 
+    image_used: str
+) -> Dict[str, Any]:
+    """
+    Monitor and log execution performance metrics.
+    
+    Args:
+        request_id: Request identifier
+        execution_result: Results from code execution
+        image_used: Docker image that was used
+        
+    Returns:
+        Performance metrics dictionary
+    """
+    performance_metrics = {
+        "request_id": request_id,
+        "image_used": image_used,
+        "execution_time": execution_result.get("execution_time", 0),
+        "success": execution_result.get("success", False),
+        "optimization_level": "optimized" if image_used == CUSTOM_ANALYSIS_IMAGE else "fallback",
+        "timestamp": time.time()
+    }
+    
+    # Log performance for monitoring
+    if performance_metrics["optimization_level"] == "optimized":
+        logger.info(f"PERFORMANCE | {request_id} | Optimized execution: {performance_metrics['execution_time']:.2f}s")
+    else:
+        logger.info(f"PERFORMANCE | {request_id} | Fallback execution: {performance_metrics['execution_time']:.2f}s")
+    
+    # Suggest optimizations if execution was slow
+    if performance_metrics["execution_time"] > 60:
+        if performance_metrics["optimization_level"] == "fallback":
+            logger.info(f"OPTIMIZATION | {request_id} | Consider building optimized image for better performance")
+        else:
+            logger.info(f"OPTIMIZATION | {request_id} | Long execution time may indicate complex analysis")
+    
+    return performance_metrics

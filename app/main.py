@@ -16,10 +16,11 @@ from fastapi.responses import JSONResponse
 from .logger import setup_logger, log_api_request
 from .utils import (
     validate_file_type, save_uploaded_files, 
-    analyze_file_structure, read_execution_results
+    analyze_file_structure, read_execution_results,
+    pre_scrape_data
 )
 from .llm import generate_analysis_code
-from .docker_runner import execute_code_in_docker
+from .docker_runner import execute_code_in_docker, initialize_docker_environment
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -53,6 +54,13 @@ async def startup_event():
     """Initialize the application on startup."""
     logger.info("Starting Data Analysis API server")
     logger.info("Required directories created/verified")
+    
+    # Initialize Docker environment for optimal performance
+    docker_status = await initialize_docker_environment()
+    if docker_status["status"] == "error":
+        logger.error("Failed to initialize Docker environment - some functionality may be limited")
+    else:
+        logger.info(f"Docker environment ready: {docker_status['message']}")
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -66,13 +74,23 @@ async def root():
 
 @app.get("/health")
 async def health_check():
-    """Detailed health check."""
+    """Detailed health check including Docker status."""
+    from .docker_runner import get_docker_stats, get_best_available_image
+    
+    docker_stats = await get_docker_stats()
+    current_image = await get_best_available_image()
+    
     return {
         "status": "healthy",
         "directories": {
             "sandbox": SANDBOX_DIR.exists(),
             "logs": LOGS_DIR.exists(),
             "examples": EXAMPLES_DIR.exists()
+        },
+        "docker": {
+            "available": docker_stats.get("available", False),
+            "current_image": current_image,
+            "stats": docker_stats
         }
     }
 
@@ -200,6 +218,11 @@ async def process_files(
             file_paths.append(file_path)
             logger.info(f"Request {request_uuid}: Saved file: {file.filename}")
         
+        # Pre-scrape data based on question URLs before analysis
+        scraped_files = pre_scrape_data(question_content, sandbox_path)
+        if scraped_files:
+            file_paths.extend(scraped_files)
+            logger.info(f"Request {request_uuid}: Pre-scraped data files: {[str(p) for p in scraped_files]}")
         # Analyze file structure for LLM context (includes scraped data if available)
         from .utils import get_all_available_files
         all_available_files = get_all_available_files(sandbox_path, file_paths)
@@ -224,11 +247,14 @@ async def process_files(
         
         logger.info(f"Request {request_uuid}: Successfully generated analysis code")
         
-        # Determine timeout based on task complexity
-        timeout = 60  # Default timeout
-        if any(keyword in question_content.lower() for keyword in ['scrape', 'web', 'url', 'wikipedia', 'http']):
-            timeout = 120  # Extended timeout for web scraping tasks
-            logger.info(f"Request {request_uuid}: Detected web scraping task, using extended timeout of {timeout}s")
+        # Determine timeout based on task complexity intelligently
+        has_scraped_data = any('scraped_data' in str(f) for f in all_available_files)
+        timeout = determine_optimal_timeout(
+            question=question_content, 
+            file_count=len(file_paths),
+            has_scraped_data=has_scraped_data
+        )
+        logger.info(f"Request {request_uuid}: Using intelligent timeout of {timeout}s")
         
         # Execute the generated code in Docker
         logger.info(f"Request {request_uuid}: Executing code in Docker container")
@@ -387,6 +413,18 @@ async def analyze_files(
             )
         
         logger.info(f"Request {request_id}: Successfully generated analysis code")
+        
+        # Use intelligent timeout determination if not specified
+        if timeout == 60:  # Default timeout, use intelligent determination
+            has_scraped_data = any('scraped_data' in str(f) for f in all_available_files)
+            timeout = determine_optimal_timeout(
+                question=question,
+                file_count=len(file_paths),
+                has_scraped_data=has_scraped_data
+            )
+            logger.info(f"Request {request_id}: Using intelligent timeout of {timeout}s")
+        else:
+            logger.info(f"Request {request_id}: Using specified timeout of {timeout}s")
         
         # Execute the generated code in Docker
         logger.info(f"Request {request_id}: Executing code in Docker container")
@@ -616,3 +654,51 @@ def validate_response_structure(response: Dict[str, Any]) -> Dict[str, Any]:
                 response[field] = 0
     
     return response
+
+def determine_optimal_timeout(question: str, file_count: int, has_scraped_data: bool) -> int:
+    """
+    Intelligently determine optimal timeout based on analysis complexity.
+    
+    Args:
+        question: Analysis question text
+        file_count: Number of files to process
+        has_scraped_data: Whether pre-scraped data is available
+        
+    Returns:
+        Optimal timeout in seconds
+    """
+    base_timeout = 60  # Base timeout
+    
+    # Analysis complexity factors
+    complexity_keywords = {
+        'web_scraping': ['scrape', 'web', 'url', 'wikipedia', 'http', 'website'],
+        'machine_learning': ['model', 'predict', 'classification', 'clustering', 'regression', 'ml'],
+        'complex_analysis': ['comprehensive', 'detailed', 'advanced', 'complex', 'correlation'],
+        'visualization': ['plot', 'chart', 'graph', 'visualiz', 'dashboard']
+    }
+    
+    timeout_adjustments = {
+        'web_scraping': 60 if not has_scraped_data else 0,  # No extra time if data already scraped
+        'machine_learning': 45,
+        'complex_analysis': 30,
+        'visualization': 15
+    }
+    
+    question_lower = question.lower()
+    total_adjustment = 0
+    
+    for category, keywords in complexity_keywords.items():
+        if any(keyword in question_lower for keyword in keywords):
+            total_adjustment += timeout_adjustments[category]
+            logger.info(f"Added {timeout_adjustments[category]}s timeout for {category} complexity")
+    
+    # File count adjustment
+    if file_count > 3:
+        file_adjustment = min((file_count - 3) * 10, 30)  # Max 30s extra for many files
+        total_adjustment += file_adjustment
+        logger.info(f"Added {file_adjustment}s timeout for {file_count} files")
+    
+    optimal_timeout = min(base_timeout + total_adjustment, 300)  # Cap at 5 minutes
+    logger.info(f"Determined optimal timeout: {optimal_timeout}s")
+    
+    return optimal_timeout

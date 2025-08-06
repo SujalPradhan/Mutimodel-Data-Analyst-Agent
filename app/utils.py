@@ -14,6 +14,8 @@ import pandas as pd
 from fastapi import UploadFile
 import aiofiles
 import shutil
+import requests
+from bs4 import BeautifulSoup
 
 # Supported file types and their extensions
 SUPPORTED_EXTENSIONS = {
@@ -212,7 +214,8 @@ def get_all_available_files(sandbox_path: Path, original_files: List[Path]) -> L
         'scraped_data.csv',
         'scraped_data.json',
         'scraped_data.txt',
-        'scraped_data.xlsx'
+        'scraped_data.xlsx',
+        'scraped_data.html'
     ]
     
     # Add any existing scraped data files in the sandbox to all_files
@@ -893,3 +896,41 @@ def _preview_text(file_path: Path, max_lines: int) -> Dict[str, Any]:
             "file_type": "text",
             "error": f"Text parse error: {str(e)}"
         }
+
+def pre_scrape_data(question_text: str, sandbox_path: Path) -> list[Path]:
+    """
+    Pre-scrape data from URLs found in question_text and save into sandbox.
+    Returns list of file paths of saved scraped data.
+    """
+    scraped_files: list[Path] = []
+    urls = re.findall(r'https?://[^\s]+', question_text)
+    for url in urls:
+        try:
+            response = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'})
+            response.raise_for_status()
+            # Attempt to parse tabular data
+            try:
+                tables = pd.read_html(response.text)
+                if tables:
+                    df = tables[0]
+                    csv_path = sandbox_path / 'scraped_data.csv'
+                    df.to_csv(csv_path, index=False)
+                    scraped_files.append(csv_path)
+                    continue
+            except Exception:
+                pass
+            # Fallback: save full JSON if structured or HTML
+            content_type = response.headers.get('Content-Type', '')
+            if 'application/json' in content_type:
+                json_path = sandbox_path / 'scraped_data.json'
+                with open(json_path, 'w', encoding='utf-8') as f:
+                    json.dump(response.json(), f)
+                scraped_files.append(json_path)
+            else:
+                html_path = sandbox_path / 'scraped_data.html'
+                with open(html_path, 'w', encoding='utf-8') as f:
+                    f.write(response.text)
+                scraped_files.append(html_path)
+        except Exception:
+            continue
+    return scraped_files
