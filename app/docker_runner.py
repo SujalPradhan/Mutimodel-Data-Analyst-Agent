@@ -11,11 +11,11 @@ from typing import Dict, Any, Optional
 import tempfile
 import shutil
 
-from logger import setup_logger, log_docker_operation
-from utils import create_code_file, read_execution_results
+from .logger import setup_logger, log_docker_operation, logger
+from .utils import create_code_file, read_execution_results
 
-# Initialize logger
-logger = setup_logger()
+# Initialize logger (use global logger from logger module)
+# logger = setup_logger()
 
 # Docker configuration
 DOCKER_IMAGE = "python:3.11-slim"
@@ -534,3 +534,95 @@ class DockerExecutor:
             request_id=self.request_id,
             timeout=timeout
         )
+
+def run_code_in_docker(code_str: str, input_dir: str) -> dict:
+    """
+    Synchronous wrapper to run Python code in a Docker container.
+    
+    Args:
+        code_str: Python code to execute
+        input_dir: Directory path containing input files (will be used as sandbox)
+        
+    Returns:
+        Dictionary with execution results containing:
+        - success: Boolean indicating if execution was successful
+        - stdout: Standard output from execution
+        - stderr: Standard error from execution
+        - execution_time: Time taken for execution in seconds
+        - return_code: Process return code
+        - error: Error message if execution failed
+    """
+    import subprocess
+    import time
+    
+    try:
+        # Convert input_dir to Path object
+        input_path = Path(input_dir)
+        
+        # Create input directory if it doesn't exist
+        input_path.mkdir(parents=True, exist_ok=True)
+        
+        # Save code to script.py in the input directory
+        script_path = input_path / "script.py"
+        with open(script_path, 'w', encoding='utf-8') as f:
+            f.write(code_str)
+        
+        # Prepare Docker command
+        docker_cmd = [
+            "docker", "run",
+            "--rm",  # Remove container after execution
+            "--memory", "512m",  # Memory limit
+            "-v", f"{input_path.absolute()}:/sandbox",  # Mount input_dir as /sandbox
+            "python:3.11-slim",  # Base image
+            "python", "/sandbox/script.py"  # Command to execute
+        ]
+        
+        # Record start time
+        start_time = time.time()
+        
+        # Execute Docker container using subprocess.run()
+        result = subprocess.run(
+            docker_cmd,
+            capture_output=True,
+            text=True,
+            timeout=300  # 5 minute timeout
+        )
+        
+        # Calculate execution time
+        execution_time = time.time() - start_time
+        
+        # Decode output
+        stdout_str = result.stdout if result.stdout else ""
+        stderr_str = result.stderr if result.stderr else ""
+        
+        # Check if execution was successful
+        success = result.returncode == 0
+        
+        return {
+            "success": success,
+            "stdout": stdout_str,
+            "stderr": stderr_str,
+            "execution_time": execution_time,
+            "return_code": result.returncode,
+            "error": None if success else f"Process exited with code {result.returncode}"
+        }
+        
+    except subprocess.TimeoutExpired:
+        return {
+            "success": False,
+            "stdout": "",
+            "stderr": "Process timed out after 300 seconds",
+            "execution_time": 300,
+            "return_code": -1,
+            "error": "Execution timed out"
+        }
+    except Exception as e:
+        logger.error(f"Error in run_code_in_docker: {str(e)}")
+        return {
+            "success": False,
+            "stdout": "",
+            "stderr": str(e),
+            "execution_time": 0,
+            "return_code": -1,
+            "error": f"Failed to execute code: {str(e)}"
+        }

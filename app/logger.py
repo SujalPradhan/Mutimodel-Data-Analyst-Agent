@@ -206,6 +206,41 @@ def log_file_operation(logger: logging.Logger, request_id: str, operation: str,
     
     logger.info(log_msg)
 
+def log_api_request(
+    logger: logging.Logger,
+    request_id: str,
+    endpoint: str,
+    method: str,
+    files_count: int = 0,
+    question_preview: str = "",
+    **kwargs
+):
+    """
+    Log API request details.
+    
+    Args:
+        logger: Logger instance
+        request_id: Request ID
+        endpoint: API endpoint
+        method: HTTP method
+        files_count: Number of files uploaded
+        question_preview: Preview of the question
+        **kwargs: Additional parameters to log
+    """
+    log_msg = f"API REQUEST | ID: {request_id} | {method} {endpoint}"
+    
+    if files_count > 0:
+        log_msg += f" | Files: {files_count}"
+    
+    if question_preview:
+        log_msg += f" | Question: {question_preview}"
+    
+    # Add any additional parameters
+    for key, value in kwargs.items():
+        log_msg += f" | {key}: {value}"
+    
+    logger.info(log_msg)
+
 class RequestLogger:
     """Context manager for request-specific logging."""
     
@@ -244,3 +279,7 @@ class RequestLogger:
     def debug(self, message: str):
         """Log debug message with request ID."""
         self.logger.debug(f"ID: {self.request_id} | {message}")
+
+
+# Create a global logger instance for easy import
+logger = setup_logger()

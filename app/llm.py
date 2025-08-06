@@ -4,16 +4,17 @@ LLM integration module for generating analysis code using Google's Gemini API.
 import os
 import json
 import asyncio
+import re
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 import google.generativeai as genai
 from google.generativeai.types import HarmCategory, HarmBlockThreshold
 
-from logger import setup_logger, log_llm_interaction
-from utils import analyze_file_structure, get_file_sample_content
+from .logger import setup_logger, log_llm_interaction, logger
+from .utils import analyze_file_structure, get_file_sample_content
 
-# Initialize logger
-logger = setup_logger()
+# Initialize logger (use global logger from logger module)
+# logger = setup_logger()
 
 # Configure Gemini API
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
@@ -105,7 +106,7 @@ async def generate_analysis_code(
             return None
         
         # Validate generated code
-        from utils import validate_generated_code
+        from .utils import validate_generated_code
         is_valid, error_msg = validate_generated_code(generated_code)
         
         if not is_valid:
@@ -185,14 +186,25 @@ from io import BytesIO
 # Set matplotlib to non-interactive backend
 plt.switch_backend('Agg')
 
+# Custom JSON encoder to handle numpy types
+class NumpyEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, np.integer):
+            return int(obj)
+        elif isinstance(obj, np.floating):
+            return float(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return super(NumpyEncoder, self).default(obj)
+
 def main():
     try:
         # Your analysis code here
         results = {{"status": "success", "message": "Analysis completed"}}
         
-        # Save results
+        # Save results using custom encoder
         with open('result.json', 'w') as f:
-            json.dump(results, f)
+            json.dump(results, f, cls=NumpyEncoder)
             
     except Exception as e:
         error_results = {{"status": "error", "error": str(e)}}
@@ -400,3 +412,94 @@ def get_model_info() -> Dict[str, Any]:
         "api_key_configured": bool(GEMINI_API_KEY),
         "generation_config": GENERATION_CONFIG
     }
+
+async def generate_code_from_prompt(question_text: str, file_list: list[str]) -> str:
+    """
+    Generate Python code from a natural language prompt using Gemini Pro API.
+    
+    Args:
+        question_text: Natural language task description
+        file_list: List of uploaded file names
+        
+    Returns:
+        Generated Python code as a string
+    """
+    if not GEMINI_API_KEY:
+        logger.error("GEMINI_API_KEY environment variable not set")
+        return ""
+    
+    try:
+        # Construct the prompt
+        prompt = _construct_code_generation_prompt(question_text, file_list)
+        
+        # Initialize model
+        model = genai.GenerativeModel(
+            model_name=MODEL_NAME,
+            generation_config=GENERATION_CONFIG,
+            safety_settings=SAFETY_SETTINGS
+        )
+        
+        # Generate response
+        response = await asyncio.to_thread(model.generate_content, prompt)
+        
+        if not response or not response.text:
+            logger.error("Empty response from Gemini API")
+            return ""
+        
+        # Extract Python code from response
+        generated_code = extract_code_from_response(response.text)
+        
+        if not generated_code:
+            logger.warning("Could not extract Python code from response, returning raw response")
+            # Strip markdown code blocks if present
+            code = response.text.strip()
+            if code.startswith("```python"):
+                code = code[9:]
+            if code.startswith("```"):
+                code = code[3:]
+            if code.endswith("```"):
+                code = code[:-3]
+            return code.strip()
+        
+        logger.info("Successfully generated Python code from prompt")
+        return generated_code
+        
+    except Exception as e:
+        logger.error(f"Error generating code from prompt: {str(e)}")
+        return ""
+
+def _construct_code_generation_prompt(question_text: str, file_list: list[str]) -> str:
+    """
+    Construct a prompt for code generation.
+    
+    Args:
+        question_text: Natural language task description
+        file_list: List of uploaded file names
+        
+    Returns:
+        Formatted prompt string
+    """
+    file_list_str = "\n".join([f"- {filename}" for filename in file_list])
+    
+    prompt = f"""
+You are a Python code generation expert. Generate Python code to solve the following task.
+
+**TASK:** {question_text}
+
+**AVAILABLE FILES:**
+{file_list_str}
+
+**INSTRUCTIONS:**
+1. Write complete, executable Python code
+2. Use only standard libraries and common data science libraries (pandas, numpy, matplotlib, seaborn, plotly, scipy, networkx)
+3. Read files from the current directory using the filenames provided above
+4. Include proper error handling with try-except blocks
+5. Save results to appropriate output files (JSON, CSV, or images)
+6. Add comments to explain the approach
+
+**IMPORTANT:** Return ONLY Python code. Do not include explanations, markdown formatting, or any other text. The response should be valid Python code that can be executed directly.
+
+Generate the Python code now:
+"""
+    
+    return prompt

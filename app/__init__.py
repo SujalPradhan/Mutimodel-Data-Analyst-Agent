@@ -8,18 +8,16 @@ __version__ = "1.0.0"
 __author__ = "Data Analysis API Team"
 __description__ = "AI-powered file analysis system"
 
-# Package exports
+# Package exports for Phase 2
 from .main import app
-from .logger import setup_logger
-from .utils import validate_file_type, save_uploaded_files
-from .llm import generate_analysis_code
-from .docker_runner import execute_code_in_docker
+from .logger import setup_logger, logger
+from .utils import infer_task_type, preview_file, sanitize_filename
 
 __all__ = [
     "app",
     "setup_logger",
-    "validate_file_type",
-    "save_uploaded_files",
-    "generate_analysis_code",
-    "execute_code_in_docker",
+    "logger",
+    "infer_task_type",
+    "preview_file", 
+    "sanitize_filename",
 ]
