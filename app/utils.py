@@ -900,37 +900,218 @@ def _preview_text(file_path: Path, max_lines: int) -> Dict[str, Any]:
 def pre_scrape_data(question_text: str, sandbox_path: Path) -> list[Path]:
     """
     Pre-scrape data from URLs found in question_text and save into sandbox.
+    Uses HTML cleaning for better data extraction.
     Returns list of file paths of saved scraped data.
     """
+    from .html_cleaner import (
+        scrape_and_clean_url, extract_table_metadata, 
+        create_table_extraction_guide, create_wikipedia_film_extraction_guide
+    )
+    from .logger import logger
+    
     scraped_files: list[Path] = []
     urls = re.findall(r'https?://[^\s]+', question_text)
+    
+    if not urls:
+        logger.info("No URLs found in question text")
+        return scraped_files
+    
+    # Extract keywords from question for targeted cleaning
+    target_keywords = extract_keywords_from_question(question_text)
+    
+    logger.info(f"Pre-scraping found {len(urls)} URLs: {urls}")
+    logger.info(f"Target keywords: {target_keywords}")
+    
     for url in urls:
         try:
-            response = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'})
-            response.raise_for_status()
-            # Attempt to parse tabular data
-            try:
-                tables = pd.read_html(response.text)
-                if tables:
-                    df = tables[0]
-                    csv_path = sandbox_path / 'scraped_data.csv'
-                    df.to_csv(csv_path, index=False)
-                    scraped_files.append(csv_path)
-                    continue
-            except Exception:
-                pass
-            # Fallback: save full JSON if structured or HTML
-            content_type = response.headers.get('Content-Type', '')
-            if 'application/json' in content_type:
-                json_path = sandbox_path / 'scraped_data.json'
-                with open(json_path, 'w', encoding='utf-8') as f:
-                    json.dump(response.json(), f)
-                scraped_files.append(json_path)
+            logger.info(f"Attempting to scrape and clean URL: {url}")
+            
+            # Use HTML cleaner for better data extraction
+            cleaned_html, metadata, summary = scrape_and_clean_url(
+                url=url, 
+                target_keywords=target_keywords,
+                save_path=sandbox_path / 'scraped_data_cleaned.html'
+            )
+            
+            logger.info(f"Successfully scraped and cleaned URL: {url}")
+            logger.info(f"Metadata: {metadata}")
+            
+            # Save HTML structure summary for LLM reference
+            summary_path = sandbox_path / 'html_structure_summary.txt'
+            with open(summary_path, 'w', encoding='utf-8') as f:
+                f.write(summary)
+            scraped_files.append(summary_path)
+            logger.info(f"Saved HTML structure summary to: {summary_path}")
+            
+            # Create specialized extraction guide for Wikipedia film data
+            if 'wikipedia.org' in url and any(keyword in question_text.lower() for keyword in ['film', 'movie', 'gross', 'box office']):
+                film_guide_path = sandbox_path / 'wikipedia_film_extraction_guide.txt'
+                film_guide = create_wikipedia_film_extraction_guide(cleaned_html)
+                with open(film_guide_path, 'w', encoding='utf-8') as f:
+                    f.write(film_guide)
+                scraped_files.append(film_guide_path)
+                logger.info(f"Created specialized Wikipedia film extraction guide: {film_guide_path}")
             else:
-                html_path = sandbox_path / 'scraped_data.html'
-                with open(html_path, 'w', encoding='utf-8') as f:
+                # Create general table extraction guide
+                table_guide_path = sandbox_path / 'table_extraction_guide.txt'
+                table_guide = create_table_extraction_guide(cleaned_html)
+                with open(table_guide_path, 'w', encoding='utf-8') as f:
+                    f.write(table_guide)
+                scraped_files.append(table_guide_path)
+                logger.info(f"Created table extraction guide: {table_guide_path}")
+            
+            # Attempt to parse tabular data from cleaned HTML
+            try:
+                import pandas as pd
+                from io import StringIO
+                # Try multiple table extraction strategies
+                tables = pd.read_html(StringIO(cleaned_html), header=0)
+                
+                if tables:
+                    # Find the best table for film data
+                    best_table = None
+                    best_score = 0
+                    
+                    for i, table in enumerate(tables):
+                        score = 0
+                        # Score based on table characteristics
+                        if table.shape[0] > 20:  # Good number of rows
+                            score += 10
+                        if table.shape[1] >= 4:  # Multiple columns
+                            score += 5
+                            
+                        # Check column names for film-related content
+                        col_text = ' '.join([str(col).lower() for col in table.columns])
+                        if any(keyword in col_text for keyword in ['rank', 'title', 'gross', 'film']):
+                            score += 15
+                            
+                        # Check table content for film indicators
+                        table_text = table.to_string().lower()
+                        film_indicators = sum(1 for word in ['avatar', 'avengers', 'titanic', 'billion'] if word in table_text)
+                        score += film_indicators * 2
+                        
+                        if score > best_score:
+                            best_score = score
+                            best_table = table
+                            logger.info(f"Table {i} scored {score} points - new best candidate")
+                    
+                    if best_table is not None:
+                        # Clean the best table
+                        main_table = best_table.copy()
+                        
+                        # Clean column names
+                        if main_table.shape[1] >= 5:
+                            # Common Wikipedia film table structure
+                            new_columns = ['Rank', 'Peak', 'Title', 'Worldwide_Gross', 'Year']
+                            if main_table.shape[1] > 5:
+                                new_columns.extend([f'Column_{i+6}' for i in range(main_table.shape[1] - 5)])
+                            main_table.columns = new_columns[:main_table.shape[1]]
+                        
+                        # Remove rows that are clearly headers or separators
+                        main_table = main_table[main_table['Rank'].astype(str).str.match(r'^\d+$', na=False)]
+                        
+                        # Clean numeric columns
+                        if 'Worldwide_Gross' in main_table.columns:
+                            main_table['Worldwide_Gross'] = main_table['Worldwide_Gross'].astype(str)
+                            main_table['Worldwide_Gross'] = main_table['Worldwide_Gross'].str.replace('$', '', regex=False)
+                            main_table['Worldwide_Gross'] = main_table['Worldwide_Gross'].str.replace(',', '', regex=False)
+                        
+                        csv_path = sandbox_path / 'scraped_data.csv'
+                        main_table.to_csv(csv_path, index=False)
+                        scraped_files.append(csv_path)
+                        logger.info(f"Extracted and cleaned tabular data to CSV: {csv_path} (shape: {main_table.shape})")
+                        
+                        # Save extraction metadata
+                        extraction_metadata = {
+                            'url': url,
+                            'tables_found': len(tables),
+                            'main_table_shape': main_table.shape,
+                            'columns': list(main_table.columns),
+                            'best_table_score': best_score,
+                            'sample_data': main_table.head(3).to_dict('records') if len(main_table) > 0 else [],
+                            'cleaning_metadata': metadata
+                        }
+                        metadata_path = sandbox_path / 'extraction_metadata.json'
+                        with open(metadata_path, 'w', encoding='utf-8') as f:
+                            import json
+                            json.dump(extraction_metadata, f, indent=2, default=str)
+                        scraped_files.append(metadata_path)
+                        logger.info(f"Saved extraction metadata: {metadata_path}")
+                    else:
+                        logger.warning("No suitable table found among extracted tables")
+                        
+            except Exception as table_error:
+                logger.warning(f"Could not extract tabular data from cleaned HTML: {table_error}")
+                # Still save the cleaned HTML for manual extraction
+                pass
+                
+        except Exception as e:
+            logger.error(f"Error scraping URL {url}: {e}")
+            # Try to save raw HTML as fallback
+            try:
+                import requests
+                headers = {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                }
+                response = requests.get(url, headers=headers, timeout=30)
+                response.raise_for_status()
+                
+                raw_html_path = sandbox_path / 'scraped_data.html'
+                with open(raw_html_path, 'w', encoding='utf-8') as f:
                     f.write(response.text)
-                scraped_files.append(html_path)
-        except Exception:
-            continue
+                scraped_files.append(raw_html_path)
+                logger.info(f"Saved raw HTML as fallback: {raw_html_path}")
+                
+            except Exception as fallback_error:
+                logger.error(f"Failed to save even raw HTML for {url}: {fallback_error}")
+                pass
+    
+    logger.info(f"Pre-scraping completed. Created {len(scraped_files)} files: {[f.name for f in scraped_files]}")
     return scraped_files
+
+
+def extract_keywords_from_question(question_text: str) -> List[str]:
+    """
+    Extract relevant keywords from question text for targeted HTML cleaning.
+    
+    Args:
+        question_text: Natural language question
+        
+    Returns:
+        List of keywords for HTML cleaning
+    """
+    # Common data-related keywords
+    base_keywords = ['table', 'data', 'list', 'ranking', 'information']
+    
+    # Extract domain-specific keywords
+    question_lower = question_text.lower()
+    
+    # Movie/Entertainment keywords
+    if any(word in question_lower for word in ['movie', 'film', 'box office', 'gross', 'cinema']):
+        base_keywords.extend(['highest-grossing', 'box office', 'worldwide', 'gross', 'revenue', 'film', 'movie'])
+    
+    # Business/Sales keywords
+    if any(word in question_lower for word in ['sales', 'revenue', 'business', 'profit', 'financial']):
+        base_keywords.extend(['sales', 'revenue', 'profit', 'business', 'financial', 'earnings'])
+    
+    # Sports keywords
+    if any(word in question_lower for word in ['sport', 'team', 'player', 'score', 'match']):
+        base_keywords.extend(['team', 'player', 'score', 'match', 'season', 'league'])
+    
+    # Financial/Stock keywords
+    if any(word in question_lower for word in ['stock', 'share', 'market', 'price', 'trading']):
+        base_keywords.extend(['stock', 'share', 'price', 'market', 'trading', 'index'])
+    
+    # Geographic/Country keywords
+    if any(word in question_lower for word in ['country', 'region', 'city', 'population', 'geographic']):
+        base_keywords.extend(['country', 'region', 'population', 'area', 'capital'])
+    
+    # Extract explicit nouns and important terms
+    import re
+    words = re.findall(r'\b[a-zA-Z]+\b', question_text)
+    important_words = [word for word in words if len(word) > 4 and word.lower() not in 
+                      ['this', 'that', 'with', 'from', 'have', 'been', 'will', 'what', 'where', 'when']]
+    
+    base_keywords.extend(important_words[:5])  # Add up to 5 important words
+    
+    return list(set(base_keywords))  # Remove duplicates

@@ -198,11 +198,20 @@ async def execute_with_prebuilt_image(
     try:
         log_docker_operation(logger, request_id, "start_optimized")
         
+        # Check if code requires network access (web scraping)
+        needs_network = check_if_network_needed(code)
+        network_config = [] if needs_network else ["--network", "none"]
+        
+        if needs_network:
+            logger.info(f"Request {request_id}: Enabling network access for web scraping")
+        else:
+            logger.info(f"Request {request_id}: Using isolated network for security")
+        
         # Prepare optimized Docker command for pre-built image
         docker_cmd = [
             "docker", "run",
             "--rm",  # Remove container after execution
-            "--network", "none",  # No network access for security
+            *network_config,  # Conditional network access
             "--memory", "768m",  # Slightly more memory for pre-built image
             "--cpus", "1.5",  # Allow more CPU for faster execution
             "--name", f"analysis-opt-{request_id[:8]}",
@@ -295,6 +304,15 @@ async def execute_with_package_install(
     try:
         log_docker_operation(logger, request_id, "start_fallback")
         
+        # Check if code requires network access (web scraping)
+        needs_network = check_if_network_needed(code)
+        network_config = [] if needs_network else ["--network", "none"]
+        
+        if needs_network:
+            logger.info(f"Request {request_id}: Enabling network access for web scraping (fallback mode)")
+        else:
+            logger.info(f"Request {request_id}: Using isolated network for security (fallback mode)")
+        
         # Create optimized install script with better error handling
         install_script = """#!/bin/bash
 set -e
@@ -321,6 +339,7 @@ python analysis.py
         docker_cmd = [
             "docker", "run",
             "--rm",
+            *network_config,  # Conditional network access
             "--memory", "512m",
             "--cpus", "1.0",
             "--name", f"analysis-fb-{request_id[:8]}",
@@ -909,6 +928,9 @@ pip install --no-cache-dir pandas numpy matplotlib seaborn networkx scipy plotly
         os.chmod(install_file, 0o755)
         
         # Prepare Docker command
+        needs_network = check_if_network_needed(code)
+        network_config = [] if needs_network else ["--network", "none"]
+        
         if image_name == FALLBACK_IMAGE:
             # Use install script for standard Python image
             cmd_args = ["bash", "install_and_run.sh"]
@@ -919,7 +941,7 @@ pip install --no-cache-dir pandas numpy matplotlib seaborn networkx scipy plotly
         docker_cmd = [
             "docker", "run",
             "--rm",
-            "--network", "none",
+            *network_config,  # Conditional network access
             "--memory", "512m",
             "--cpus", "1.0",
             "-v", f"{sandbox_path.absolute()}:/workspace",
@@ -1103,10 +1125,15 @@ def run_code_in_docker(code_str: str, input_dir: str) -> dict:
         with open(script_path, 'w', encoding='utf-8') as f:
             f.write(code_str)
         
+        # Check if network access is needed
+        needs_network = check_if_network_needed(code_str)
+        network_config = [] if needs_network else ["--network", "none"]
+        
         # Prepare Docker command
         docker_cmd = [
             "docker", "run",
             "--rm",  # Remove container after execution
+            *network_config,  # Conditional network access
             "--memory", "512m",  # Memory limit
             "-v", f"{input_path.absolute()}:/sandbox",  # Mount input_dir as /sandbox
             "python:3.11-slim",  # Base image
@@ -1202,3 +1229,75 @@ async def monitor_execution_performance(
             logger.info(f"OPTIMIZATION | {request_id} | Long execution time may indicate complex analysis")
     
     return performance_metrics
+
+def check_if_network_needed(code: str) -> bool:
+    """
+    Check if the generated code requires network access for web scraping.
+    
+    Args:
+        code: Python code to analyze
+        
+    Returns:
+        True if network access is needed, False otherwise
+    """
+    network_indicators = [
+        # Direct HTTP libraries
+        'requests.get',
+        'requests.post', 
+        'requests.put',
+        'requests.delete',
+        'requests.head',
+        'requests.Session',
+        'session.get',
+        'session.post',
+        'urllib.request',
+        'urllib.urlopen',
+        'httplib',
+        'http.client',
+        
+        # Web scraping specific
+        'BeautifulSoup',
+        'soup = BeautifulSoup',
+        'response = requests',
+        'html.parser',
+        'lxml',
+        
+        # URLs and protocols
+        'http://',
+        'https://',
+        'ftp://',
+        'www.',
+        
+        # Specific sites mentioned in scraping tasks
+        'wikipedia.org',
+        'en.wikipedia',
+        'api.',
+        '.com',
+        '.org',
+        '.net',
+        
+        # Common web scraping patterns
+        'response.content',
+        'response.text',
+        'soup.find',
+        'soup.select',
+        'soup.get_text',
+        'selenium',
+        'webdriver',
+        
+        # Network imports
+        'import requests',
+        'from requests',
+        'import urllib',
+        'from urllib',
+        'import http',
+        'from http'
+    ]
+    
+    code_lower = code.lower()
+    for indicator in network_indicators:
+        if indicator.lower() in code_lower:
+            logger.debug(f"Network access needed - found indicator: {indicator}")
+            return True
+    
+    return False
