@@ -101,7 +101,7 @@ run_test() {
     echo "========================================" >> "$LOG_FILE"
     
     # Wait between tests (except for the last test)
-    if [ $TOTAL_TESTS -lt 30 ]; then  # Adjust based on total number of tests
+    if [ $TOTAL_TESTS -lt 32 ]; then  # Adjust based on total number of tests
         print_status "INFO" "Waiting ${TIMEOUT_BETWEEN_TESTS} seconds before next test..."
         sleep $TIMEOUT_BETWEEN_TESTS
     fi
@@ -125,7 +125,7 @@ check_prerequisites() {
     fi
     
     # Check example files
-    for example_dir in example1 example2 example3 example4; do
+    for example_dir in example1 example2 example3 example4 example5 example6; do
         if [ ! -d "$example_dir" ]; then
             print_status "WARNING" "Example directory $example_dir not found"
         fi
@@ -140,6 +140,8 @@ check_prerequisites() {
         "example3/sample-weather.csv"
         "example3/question.txt"
         "example4/question.txt"
+        "example5/question.txt"
+        "example6/question.txt"
     )
     
     for file in "${required_files[@]}"; do
@@ -177,15 +179,18 @@ API Configuration:
 
 Test Categories Covered:
 - Health checks
-- Network analysis
-- Sales data analysis
-- Weather data analysis
-- Web scraping analysis
+- Network analysis (Example 1)
+- Sales data analysis (Example 2)
+- Weather data analysis (Example 3)
+- Web scraping analysis (Example 4)
+- Movie data analysis (Example 5)
+- Legal data analysis (Example 6)
 - Multiple file uploads
 - Machine learning analysis
 - Error handling
 - Performance tests
 - Different analysis types
+- Various complexity levels
 
 EOF
 
@@ -220,85 +225,24 @@ main() {
     run_test "Root Endpoint Check" \
         'curl -s -X GET "http://localhost:8000/" -H "accept: application/json" -w "\nHTTP Status: %{http_code}\nTime: %{time_total}s\n"'
     
-    # 1. NETWORK ANALYSIS TESTS
-    run_test "Network Analysis - Example 1" \
-        'curl -s -X POST "http://localhost:8000/api/analyze" -F "files=@example1/edges.csv" -F "question=$(cat example1/question.txt)" -F "analysis_type=network" -F "timeout=120" -w "\nHTTP Status: %{http_code}\nTime: %{time_total}s\n"'
+    # 1. CORE EXAMPLE TESTS - All 6 Example Folders
+    run_test "Example 1 - Network Analysis" \
+        'curl -s -X POST "http://localhost:8000/api/" -F "question.txt=@example1/question.txt" -F "edges.csv=@example1/edges.csv" -w "\nHTTP Status: %{http_code}\nTime: %{time_total}s\n"'
     
-    run_test "Network Analysis - Custom Question" \
-        'curl -s -X POST "http://localhost:8000/api/analyze" -F "files=@example1/edges.csv" -F "question=Analyze this network and find the most important nodes. Create visualizations showing node degree distribution and network structure." -F "analysis_type=network" -F "timeout=120" -w "\nHTTP Status: %{http_code}\nTime: %{time_total}s\n"'
+    run_test "Example 2 - Sales Data Analysis" \
+        'curl -s -X POST "http://localhost:8000/api/" -F "question.txt=@example2/question.txt" -F "sample-sale.csv=@example2/sample-sale.csv" -w "\nHTTP Status: %{http_code}\nTime: %{time_total}s\n"'
     
-    # 2. SALES DATA ANALYSIS TESTS
-    run_test "Sales Data Analysis - Example 2" \
-        'curl -s -X POST "http://localhost:8000/api/analyze" -F "files=@example2/sample-sale.csv" -F "question=$(cat example2/question.txt)" -F "analysis_type=statistical" -F "timeout=120" -w "\nHTTP Status: %{http_code}\nTime: %{time_total}s\n"'
+    run_test "Example 3 - Weather Data Analysis" \
+        'curl -s -X POST "http://localhost:8000/api/" -F "question.txt=@example3/question.txt" -F "sample-weather.csv=@example3/sample-weather.csv" -w "\nHTTP Status: %{http_code}\nTime: %{time_total}s\n"'
     
-    run_test "Sales BI Analysis" \
-        'curl -s -X POST "http://localhost:8000/api/analyze" -F "files=@example2/sample-sale.csv" -F "question=Perform a comprehensive business intelligence analysis. Identify top-performing regions, seasonal trends, growth patterns, and create executive dashboard visualizations." -F "analysis_type=statistical" -F "timeout=150" -w "\nHTTP Status: %{http_code}\nTime: %{time_total}s\n"'
     
-    # 3. WEATHER DATA ANALYSIS TESTS
-    run_test "Weather Data Analysis - Example 3" \
-        'curl -s -X POST "http://localhost:8000/api/analyze" -F "files=@example3/sample-weather.csv" -F "question=$(cat example3/question.txt)" -F "analysis_type=timeseries" -F "timeout=120" -w "\nHTTP Status: %{http_code}\nTime: %{time_total}s\n"'
+    run_test "Example 5 - Movie Data Analysis" \
+        'curl -s -X POST "http://localhost:8000/api/" -F "question.txt=@example5/question.txt" -w "\nHTTP Status: %{http_code}\nTime: %{time_total}s\n"'
     
-    run_test "Climate Analysis" \
-        'curl -s -X POST "http://localhost:8000/api/analyze" -F "files=@example3/sample-weather.csv" -F "question=Analyze climate patterns and weather trends. Look for seasonal variations, extreme weather events, and long-term climate changes. Create comprehensive weather visualizations." -F "analysis_type=timeseries" -F "timeout=150" -w "\nHTTP Status: %{http_code}\nTime: %{time_total}s\n"'
-    
-    # 4. WEB SCRAPING ANALYSIS TESTS
-    run_test "Web Scraping Analysis - Example 4" \
-        'curl -s -X POST "http://localhost:8000/api/analyze" -F "question=$(cat example4/question.txt)" -F "analysis_type=general" -F "timeout=300" -w "\nHTTP Status: %{http_code}\nTime: %{time_total}s\n"'
-    
-    run_test "Movie Data Analysis" \
-        'curl -s -X POST "http://localhost:8000/api/analyze" -F "question=Scrape the highest grossing films data from Wikipedia and perform comprehensive analysis: trends over time, studio performance, genre analysis, and box office predictions." -F "analysis_type=general" -F "timeout=300" -w "\nHTTP Status: %{http_code}\nTime: %{time_total}s\n"'
-    
-    # 5. MULTIPLE FILE ANALYSIS TESTS
-    run_test "Multiple File Analysis" \
-        'curl -s -X POST "http://localhost:8000/api/analyze" -F "files=@example1/edges.csv" -F "files=@example2/sample-sale.csv" -F "files=@example3/sample-weather.csv" -F "question=Analyze all three datasets comprehensively. Find any interesting patterns, correlations, or insights across network data, sales data, and weather data." -F "analysis_type=general" -F "timeout=180" -w "\nHTTP Status: %{http_code}\nTime: %{time_total}s\n"'
-    
-    run_test "Network + Sales Correlation" \
-        'curl -s -X POST "http://localhost:8000/api/analyze" -F "files=@example1/edges.csv" -F "files=@example2/sample-sale.csv" -F "question=Analyze potential relationships between network connectivity patterns and sales performance." -F "analysis_type=general" -F "timeout=150" -w "\nHTTP Status: %{http_code}\nTime: %{time_total}s\n"'
-    
-    # 6. MACHINE LEARNING ANALYSIS TESTS
-    run_test "ML Analysis - Sales Clustering" \
-        'curl -s -X POST "http://localhost:8000/api/analyze" -F "files=@example2/sample-sale.csv" -F "question=Perform machine learning analysis on the sales data. Apply clustering algorithms to group similar sales patterns and identify customer segments." -F "analysis_type=ml" -F "timeout=180" -w "\nHTTP Status: %{http_code}\nTime: %{time_total}s\n"'
-    
-    run_test "ML Analysis - Weather Prediction" \
-        'curl -s -X POST "http://localhost:8000/api/analyze" -F "files=@example3/sample-weather.csv" -F "question=Build machine learning models to predict weather patterns using temperature and precipitation data." -F "analysis_type=ml" -F "timeout=180" -w "\nHTTP Status: %{http_code}\nTime: %{time_total}s\n"'
-    
-    # 7. ERROR HANDLING TESTS
-    run_test "ERROR - No Files" \
-        'curl -s -X POST "http://localhost:8000/api/analyze" -F "question=Analyze this data" -F "analysis_type=statistical" -w "\nHTTP Status: %{http_code}\nTime: %{time_total}s\n"'
-    
-    run_test "ERROR - Empty Question" \
-        'curl -s -X POST "http://localhost:8000/api/analyze" -F "files=@example1/edges.csv" -F "question=" -F "analysis_type=statistical" -w "\nHTTP Status: %{http_code}\nTime: %{time_total}s\n"'
-    
-    # Create and test invalid file
-    run_test "ERROR - Invalid File Type" \
-        'echo "test content" > test_invalid.badext && curl -s -X POST "http://localhost:8000/api/analyze" -F "files=@test_invalid.badext" -F "question=Analyze this file" -F "analysis_type=general" -w "\nHTTP Status: %{http_code}\nTime: %{time_total}s\n" && rm -f test_invalid.badext'
-    
-    run_test "ERROR - Very Short Timeout" \
-        'curl -s -X POST "http://localhost:8000/api/analyze" -F "files=@example1/edges.csv" -F "question=Perform detailed network analysis" -F "analysis_type=network" -F "timeout=1" -w "\nHTTP Status: %{http_code}\nTime: %{time_total}s\n"'
-    
-    # 8. PERFORMANCE TESTS
-    run_test "Performance - Complex Analysis" \
-        'curl -s -X POST "http://localhost:8000/api/analyze" -F "files=@example2/sample-sale.csv" -F "question=Perform comprehensive business analysis with statistical measures, time series decomposition, predictive models, and multiple visualizations." -F "analysis_type=statistical" -F "timeout=300" -w "\nHTTP Status: %{http_code}\nTime: %{time_total}s\n"'
-    
-    # 9. DIFFERENT ANALYSIS TYPES
-    run_test "Analysis Type - Statistical" \
-        'curl -s -X POST "http://localhost:8000/api/analyze" -F "files=@example2/sample-sale.csv" -F "question=Perform detailed statistical analysis with hypothesis testing and distribution analysis" -F "analysis_type=statistical" -F "timeout=120" -w "\nHTTP Status: %{http_code}\nTime: %{time_total}s\n"'
-    
-    run_test "Analysis Type - General" \
-        'curl -s -X POST "http://localhost:8000/api/analyze" -F "files=@example2/sample-sale.csv" -F "question=Perform general exploratory data analysis with data quality assessment" -F "analysis_type=general" -F "timeout=120" -w "\nHTTP Status: %{http_code}\nTime: %{time_total}s\n"'
-    
-    run_test "Analysis Type - TimeSeries" \
-        'curl -s -X POST "http://localhost:8000/api/analyze" -F "files=@example3/sample-weather.csv" -F "question=Focus on time series analysis with trend detection and forecasting" -F "analysis_type=timeseries" -F "timeout=120" -w "\nHTTP Status: %{http_code}\nTime: %{time_total}s\n"'
-    
-    # 10. COMPLEXITY TESTS
-    run_test "Simple Question" \
-        'curl -s -X POST "http://localhost:8000/api/analyze" -F "files=@example1/edges.csv" -F "question=How many nodes are in this network?" -F "analysis_type=network" -F "timeout=60" -w "\nHTTP Status: %{http_code}\nTime: %{time_total}s\n"'
-    
-    run_test "Moderate Complexity" \
-        'curl -s -X POST "http://localhost:8000/api/analyze" -F "files=@example2/sample-sale.csv" -F "question=What are the top 3 sales regions and their performance trends?" -F "analysis_type=statistical" -F "timeout=90" -w "\nHTTP Status: %{http_code}\nTime: %{time_total}s\n"'
-    
-    run_test "High Complexity" \
-        'curl -s -X POST "http://localhost:8000/api/analyze" -F "files=@example3/sample-weather.csv" -F "question=Build a comprehensive weather prediction model with seasonal decomposition, trend analysis, and anomaly detection." -F "analysis_type=timeseries" -F "timeout=200" -w "\nHTTP Status: %{http_code}\nTime: %{time_total}s\n"'
+    run_test "Example 6 - Legal Data Analysis" \
+        'curl -s -X POST "http://localhost:8000/api/" -F "question.txt=@example6/question.txt" -w "\nHTTP Status: %{http_code}\nTime: %{time_total}s\n"'
+
+
     
     # Generate final summary
     echo ""
