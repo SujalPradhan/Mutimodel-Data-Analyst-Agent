@@ -1,0 +1,8 @@
+
+Answer the following questions using the attached image. Respond with a JSON array of strings containing your answers.
+
+1. How many franchises were first released before 1990?
+2. Which franchise has sold the most units that was first released after 2000?
+3. What is the average number of units sold across all franchises listed?
+4. Draw a horizontal bar chart of the top 5 franchises by units sold.  
+   Return as a base-64 encoded data URI, `"data:image/png;base64,iVBORw0KG..."` under 100,000 bytes.

@@ -18,9 +18,8 @@ from .utils import create_code_file, read_execution_results
 # Initialize logger (use global logger from logger module)
 # logger = setup_logger()
 
-# Docker configuration - prioritize custom analysis image
-CUSTOM_ANALYSIS_IMAGE = "data-analysis-env:latest"
-FALLBACK_IMAGE = os.getenv("DOCKER_IMAGE", "python:3.11-slim")
+# Docker configuration - use only optimized analysis image
+ANALYSIS_IMAGE = "data-analysis-env:latest"
 DOCKER_TIMEOUT = int(os.getenv("DOCKER_TIMEOUT", 300))  # 5 minutes max execution time
 
 # Cache for checking image availability
@@ -107,7 +106,7 @@ async def execute_code_in_docker(
         logger.info(f"Request {request_id}: Using Docker image: {image_name}")
         
         # Execute with the optimal strategy based on image type
-        if image_name == CUSTOM_ANALYSIS_IMAGE:
+        if image_name == ANALYSIS_IMAGE:
             # Use optimized execution for pre-built image
             return await execute_with_prebuilt_image(
                 code=code,
@@ -141,24 +140,23 @@ async def execute_code_in_docker(
 
 async def get_best_available_image() -> str:
     """
-    Determine the best Docker image to use based on availability.
-    Uses caching to avoid repeated image checks.
+    Determine if the analysis image is available.
     
     Returns:
-        Name of the best available Docker image
+        Name of the analysis Docker image if available, raises exception if not
     """
     global _image_cache
     
     # Check cache first
-    if CUSTOM_ANALYSIS_IMAGE in _image_cache:
-        if _image_cache[CUSTOM_ANALYSIS_IMAGE]:
-            return CUSTOM_ANALYSIS_IMAGE
+    if ANALYSIS_IMAGE in _image_cache:
+        if _image_cache[ANALYSIS_IMAGE]:
+            return ANALYSIS_IMAGE
         else:
-            return FALLBACK_IMAGE
+            raise RuntimeError("Analysis image not available and no fallback configured")
     
-    # Check if custom analysis image exists
+    # Check if analysis image exists
     try:
-        check_cmd = ["docker", "images", "-q", CUSTOM_ANALYSIS_IMAGE]
+        check_cmd = ["docker", "images", "-q", ANALYSIS_IMAGE]
         process = await asyncio.create_subprocess_exec(
             *check_cmd,
             stdout=asyncio.subprocess.PIPE,
@@ -168,19 +166,19 @@ async def get_best_available_image() -> str:
         stdout_data, _ = await asyncio.wait_for(process.communicate(), timeout=10)
         
         image_exists = bool(stdout_data.decode().strip())
-        _image_cache[CUSTOM_ANALYSIS_IMAGE] = image_exists
+        _image_cache[ANALYSIS_IMAGE] = image_exists
         
         if image_exists:
-            logger.info(f"Using optimized analysis image: {CUSTOM_ANALYSIS_IMAGE}")
-            return CUSTOM_ANALYSIS_IMAGE
+            logger.info(f"Using analysis image: {ANALYSIS_IMAGE}")
+            return ANALYSIS_IMAGE
         else:
-            logger.info(f"Custom image not found, using fallback: {FALLBACK_IMAGE}")
-            return FALLBACK_IMAGE
+            logger.error(f"Analysis image {ANALYSIS_IMAGE} not found and no fallback configured")
+            raise RuntimeError(f"Analysis image {ANALYSIS_IMAGE} not available")
             
     except Exception as e:
-        logger.warning(f"Error checking for custom image: {e}, using fallback")
-        _image_cache[CUSTOM_ANALYSIS_IMAGE] = False
-        return FALLBACK_IMAGE
+        logger.error(f"Error checking for analysis image: {e}")
+        _image_cache[ANALYSIS_IMAGE] = False
+        raise RuntimeError(f"Failed to check analysis image availability: {e}")
 
 async def execute_with_prebuilt_image(
     code: str,
@@ -318,8 +316,12 @@ async def execute_with_package_install(
 set -e
 echo "Installing required packages..."
 pip install --no-cache-dir --quiet --disable-pip-version-check \\
-    pandas numpy matplotlib seaborn networkx scipy plotly \\
-    beautifulsoup4 requests duckdb openpyxl 2>/dev/null || {
+    pandas==2.1.4 numpy==1.24.4 matplotlib==3.7.4 seaborn==0.13.0 \\
+    networkx==3.2.1 scipy==1.11.4 plotly==5.17.0 \\
+    beautifulsoup4==4.12.2 requests==2.31.0 duckdb==0.9.2 \\
+    openpyxl==3.1.2 sqlparse==0.4.4 pyarrow==14.0.1 \\
+    fsspec==2023.12.2 s3fs==2023.12.2 lxml==4.9.3 xlrd==2.0.1 \\
+    ipython==8.18.1 psutil==5.9.6 python-dateutil==2.8.2 pytz==2023.3 2>/dev/null || {
     echo "Package installation failed, proceeding anyway..."
 }
 echo "Starting analysis..."
@@ -461,14 +463,14 @@ async def check_docker_availability() -> bool:
 
 async def pull_docker_image() -> bool:
     """
-    Pull the required Docker image if not available.
+    Ensure the analysis Docker image is available, build it if necessary.
     
     Returns:
-        True if image is available/pulled successfully, False otherwise
+        True if image is available/built successfully, False otherwise
     """
     try:
         # Check if image exists locally
-        check_cmd = ["docker", "images", "-q", FALLBACK_IMAGE]
+        check_cmd = ["docker", "images", "-q", ANALYSIS_IMAGE]
         process = await asyncio.create_subprocess_exec(
             *check_cmd,
             stdout=asyncio.subprocess.PIPE,
@@ -478,42 +480,27 @@ async def pull_docker_image() -> bool:
         stdout_data, _ = await asyncio.wait_for(process.communicate(), timeout=10)
         
         if stdout_data.decode().strip():
-            logger.info(f"Docker image {FALLBACK_IMAGE} already available locally")
+            logger.info(f"Analysis image {ANALYSIS_IMAGE} already available locally")
             return True
         
-        # Pull image
-        logger.info(f"Pulling Docker image {FALLBACK_IMAGE}")
-        pull_cmd = ["docker", "pull", FALLBACK_IMAGE]
-        process = await asyncio.create_subprocess_exec(
-            *pull_cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        
-        await asyncio.wait_for(process.communicate(), timeout=300)  # 5 minutes timeout
-        
-        success = process.returncode == 0
-        if success:
-            logger.info(f"Successfully pulled Docker image {FALLBACK_IMAGE}")
-        else:
-            logger.error(f"Failed to pull Docker image {FALLBACK_IMAGE}")
-        
-        return success
+        # Build the image if it doesn't exist
+        logger.info(f"Analysis image {ANALYSIS_IMAGE} not found, building it...")
+        return await build_analysis_image()
         
     except Exception as e:
-        logger.error(f"Error checking/pulling Docker image: {str(e)}")
+        logger.error(f"Error checking/building analysis image: {str(e)}")
         return False
 
 async def ensure_analysis_image_available() -> bool:
     """
-    Ensure the optimized analysis image is available, build it if necessary.
+    Ensure the analysis image is available, build it if necessary.
     
     Returns:
         True if image is available, False otherwise
     """
     try:
-        # Check if custom analysis image exists
-        check_cmd = ["docker", "images", "-q", CUSTOM_ANALYSIS_IMAGE]
+        # Check if analysis image exists
+        check_cmd = ["docker", "images", "-q", ANALYSIS_IMAGE]
         process = await asyncio.create_subprocess_exec(
             *check_cmd,
             stdout=asyncio.subprocess.PIPE,
@@ -523,11 +510,11 @@ async def ensure_analysis_image_available() -> bool:
         stdout_data, _ = await asyncio.wait_for(process.communicate(), timeout=10)
         
         if stdout_data.decode().strip():
-            logger.info(f"Analysis image {CUSTOM_ANALYSIS_IMAGE} already available")
+            logger.info(f"Analysis image {ANALYSIS_IMAGE} already available")
             return True
         
         # Image doesn't exist, try to build it
-        logger.info(f"Building optimized analysis image: {CUSTOM_ANALYSIS_IMAGE}")
+        logger.info(f"Building analysis image: {ANALYSIS_IMAGE}")
         return await build_analysis_image()
         
     except Exception as e:
@@ -558,7 +545,7 @@ async def build_analysis_image() -> bool:
         build_cmd = [
             "docker", "build",
             "-f", str(dockerfile_path),
-            "-t", CUSTOM_ANALYSIS_IMAGE,
+            "-t", ANALYSIS_IMAGE,
             str(dockerfile_path.parent)
         ]
         
@@ -575,9 +562,9 @@ async def build_analysis_image() -> bool:
         )
         
         if process.returncode == 0:
-            logger.info(f"Successfully built analysis image: {CUSTOM_ANALYSIS_IMAGE}")
+            logger.info(f"Successfully built analysis image: {ANALYSIS_IMAGE}")
             # Update cache
-            _image_cache[CUSTOM_ANALYSIS_IMAGE] = True
+            _image_cache[ANALYSIS_IMAGE] = True
             return True
         else:
             stderr_str = stderr_data.decode('utf-8', errors='replace') if stderr_data else ""
@@ -633,7 +620,20 @@ RUN pip install --no-cache-dir --upgrade pip && \\
     beautifulsoup4==4.12.2 \\
     requests==2.31.0 \\
     duckdb==0.9.2 \\
-    openpyxl==3.1.2
+    openpyxl==3.1.2 \\
+    sqlparse==0.4.4 \\
+    pyarrow==14.0.1 \\
+    fsspec==2023.12.2 \\
+    s3fs==2023.12.2 \\
+    lxml==4.9.3 \\
+    xlrd==2.0.1 \\
+    ipython==8.18.1 \\
+    psutil==5.9.6 \\
+    python-dateutil==2.8.2 \\
+    pytz==2023.3
+
+# Pre-install DuckDB extensions for better performance
+RUN python -c "import duckdb; conn = duckdb.connect(); conn.execute('INSTALL httpfs'); conn.execute('INSTALL parquet'); conn.execute('INSTALL json'); conn.execute('INSTALL fts'); conn.close()" || echo "Extension installation will be handled at runtime"
 
 # Create non-root user for security
 RUN useradd -m -u 1000 analysis && \\
@@ -656,11 +656,11 @@ CMD ["python"]
             # Build image
             build_cmd = [
                 "docker", "build",
-                "-t", CUSTOM_ANALYSIS_IMAGE,
+                "-t", ANALYSIS_IMAGE,
                 temp_dir
             ]
             
-            logger.info("Building optimized analysis image from generated Dockerfile...")
+            logger.info("Building analysis image from generated Dockerfile...")
             process = await asyncio.create_subprocess_exec(
                 *build_cmd,
                 stdout=asyncio.subprocess.PIPE,
@@ -673,8 +673,8 @@ CMD ["python"]
             )
             
             if process.returncode == 0:
-                logger.info(f"Successfully built optimized analysis image: {CUSTOM_ANALYSIS_IMAGE}")
-                _image_cache[CUSTOM_ANALYSIS_IMAGE] = True
+                logger.info(f"Successfully built analysis image: {ANALYSIS_IMAGE}")
+                _image_cache[ANALYSIS_IMAGE] = True
                 return True
             else:
                 stderr_str = stderr_data.decode('utf-8', errors='replace') if stderr_data else ""
@@ -704,15 +704,31 @@ networkx==3.2.1
 # Scientific computing
 scipy==1.11.4
 
-# Database
+# Database and SQL processing
 duckdb==0.9.2
+sqlparse==0.4.4
+pyarrow==14.0.1
+
+# Additional DuckDB-related packages for S3 and cloud storage
+fsspec==2023.12.2
+s3fs==2023.12.2
 
 # File processing
 openpyxl==3.1.2
+xlrd==2.0.1
 beautifulsoup4==4.12.2
+lxml==4.9.3
 
 # HTTP requests
 requests==2.31.0
+
+# Jupyter support (for notebook-style outputs)
+ipython==8.18.1
+
+# Additional data processing utilities
+psutil==5.9.6
+python-dateutil==2.8.2
+pytz==2023.3
 """
     
     requirements_path = Path(__file__).parent.parent / "analysis-requirements.txt"
@@ -733,6 +749,20 @@ FROM python:3.11-slim
 RUN apt-get update && apt-get install -y \\
     gcc \\
     g++ \\
+    gfortran \\
+    libopenblas-dev \\
+    liblapack-dev \\
+    libfreetype6-dev \\
+    libpng-dev \\
+    libjpeg-dev \\
+    pkg-config \\
+    sqlite3 \\
+    libsqlite3-dev \\
+    curl \\
+    unzip \\
+    ca-certificates \\
+    libssl-dev \\
+    libcurl4-openssl-dev \\
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python packages
@@ -747,46 +777,20 @@ RUN pip install --no-cache-dir \\
     beautifulsoup4==4.12.2 \\
     requests==2.31.0 \\
     duckdb==0.9.2 \\
-    openpyxl==3.1.2
+    openpyxl==3.1.2 \\
+    sqlparse==0.4.4 \\
+    pyarrow==14.0.1 \\
+    fsspec==2023.12.2 \\
+    s3fs==2023.12.2 \\
+    lxml==4.9.3 \\
+    xlrd==2.0.1 \\
+    ipython==8.18.1 \\
+    psutil==5.9.6 \\
+    python-dateutil==2.8.2 \\
+    pytz==2023.3
 
-# Create non-root user
-RUN useradd -m -u 1000 analyst
-USER analyst
-
-# Set working directory
-WORKDIR /workspace
-
-# Default command
-CMD ["python"]
-"""
-    """
-    Create Dockerfile content for the analysis environment.
-    
-    Returns:
-        Dockerfile content as string
-    """
-    return """
-FROM python:3.11-slim
-
-# Install system dependencies
-RUN apt-get update && apt-get install -y \\
-    gcc \\
-    g++ \\
-    && rm -rf /var/lib/apt/lists/*
-
-# Install Python packages
-RUN pip install --no-cache-dir \\
-    pandas==2.1.4 \\
-    numpy==1.24.4 \\
-    matplotlib==3.7.4 \\
-    seaborn==0.13.0 \\
-    networkx==3.2.1 \\
-    scipy==1.11.4 \\
-    plotly==5.17.0 \\
-    beautifulsoup4==4.12.2 \\
-    requests==2.31.0 \\
-    duckdb==0.9.2 \\
-    openpyxl==3.1.2
+# Pre-install DuckDB extensions for better performance
+RUN python -c "import duckdb; conn = duckdb.connect(); conn.execute('INSTALL httpfs'); conn.execute('INSTALL parquet'); conn.execute('INSTALL json'); conn.execute('INSTALL fts'); conn.close()" || echo "Extension installation will be handled at runtime"
 
 # Create non-root user
 RUN useradd -m -u 1000 analyst
@@ -858,10 +862,10 @@ async def execute_with_custom_image(
     Returns:
         Dictionary with execution results
     """
-    # Use custom image if available, otherwise fallback to standard
-    image_name = "data-analysis-env:latest"
+    # Use analysis image - ensure it's available
+    image_name = ANALYSIS_IMAGE
     
-    # Check if custom image exists
+    # Check if analysis image exists
     try:
         check_cmd = ["docker", "images", "-q", image_name]
         process = await asyncio.create_subprocess_exec(
@@ -873,11 +877,13 @@ async def execute_with_custom_image(
         stdout_data, _ = await process.communicate()
         
         if not stdout_data.decode().strip():
-            # Custom image doesn't exist, use standard image
-            image_name = FALLBACK_IMAGE
+            # Analysis image doesn't exist, build it
+            logger.error(f"Analysis image {image_name} not found")
+            raise RuntimeError(f"Analysis image {image_name} not available")
             
-    except Exception:
-        image_name = FALLBACK_IMAGE
+    except Exception as e:
+        logger.error(f"Failed to verify analysis image: {e}")
+        raise RuntimeError(f"Analysis image verification failed: {e}")
     
     # Execute with the selected image
     return await execute_code_with_image(
@@ -916,7 +922,7 @@ async def execute_code_with_image(
         
         # Install packages script for standard Python image
         install_script = """
-pip install --no-cache-dir pandas numpy matplotlib seaborn networkx scipy plotly beautifulsoup4 requests duckdb openpyxl 2>/dev/null || echo "Package installation failed" && python analysis.py
+pip install --no-cache-dir pandas==2.1.4 numpy==1.24.4 matplotlib==3.7.4 seaborn==0.13.0 networkx==3.2.1 scipy==1.11.4 plotly==5.17.0 beautifulsoup4==4.12.2 requests==2.31.0 duckdb==0.9.2 openpyxl==3.1.2 sqlparse==0.4.4 pyarrow==14.0.1 fsspec==2023.12.2 s3fs==2023.12.2 lxml==4.9.3 xlrd==2.0.1 ipython==8.18.1 psutil==5.9.6 python-dateutil==2.8.2 pytz==2023.3 2>/dev/null || echo "Package installation failed" && python analysis.py
 """
         
         # Create install script file
@@ -931,11 +937,11 @@ pip install --no-cache-dir pandas numpy matplotlib seaborn networkx scipy plotly
         needs_network = check_if_network_needed(code)
         network_config = [] if needs_network else ["--network", "none"]
         
-        if image_name == FALLBACK_IMAGE:
+        if image_name != ANALYSIS_IMAGE:
             # Use install script for standard Python image
             cmd_args = ["bash", "install_and_run.sh"]
         else:
-            # Use direct Python execution for custom image
+            # Use direct Python execution for analysis image
             cmd_args = ["python", "analysis.py"]
         
         docker_cmd = [
@@ -1211,7 +1217,7 @@ async def monitor_execution_performance(
         "image_used": image_used,
         "execution_time": execution_result.get("execution_time", 0),
         "success": execution_result.get("success", False),
-        "optimization_level": "optimized" if image_used == CUSTOM_ANALYSIS_IMAGE else "fallback",
+        "optimization_level": "optimized" if image_used == ANALYSIS_IMAGE else "fallback",
         "timestamp": time.time()
     }
     
@@ -1267,6 +1273,7 @@ def check_if_network_needed(code: str) -> bool:
         'https://',
         'ftp://',
         'www.',
+        's3://',  # DuckDB S3 access
         
         # Specific sites mentioned in scraping tasks
         'wikipedia.org',
@@ -1275,6 +1282,13 @@ def check_if_network_needed(code: str) -> bool:
         '.com',
         '.org',
         '.net',
+        
+        # DuckDB S3 operations
+        'install httpfs',
+        'load httpfs',
+        'read_parquet',
+        's3_region',
+        'indian-high-court-judgments',  # Specific S3 bucket mentioned in examples
         
         # Common web scraping patterns
         'response.content',

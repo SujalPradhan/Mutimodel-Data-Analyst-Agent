@@ -20,7 +20,8 @@ from bs4 import BeautifulSoup
 # Supported file types and their extensions
 SUPPORTED_EXTENSIONS = {
     '.csv', '.json', '.txt', '.html', '.htm', '.xml', 
-    '.zip', '.xlsx', '.xls', '.tsv', '.md', '.log'
+    '.zip', '.xlsx', '.xls', '.tsv', '.md', '.log',
+    '.jpg', '.jpeg', '.png'  # Added image support
 }
 
 SUPPORTED_MIME_TYPES = {
@@ -28,7 +29,8 @@ SUPPORTED_MIME_TYPES = {
     'application/xml', 'text/xml', 'application/zip',
     'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
     'application/vnd.ms-excel', 'text/tab-separated-values',
-    'text/markdown', 'application/octet-stream'
+    'text/markdown', 'application/octet-stream',
+    'image/jpeg', 'image/jpg', 'image/png'  # Added image MIME types
 }
 
 def validate_file_type(filename: str) -> bool:
@@ -258,6 +260,8 @@ def analyze_single_file(file_path: Path) -> Dict[str, Any]:
             file_info.update(analyze_html_file(file_path))
         elif file_path.suffix.lower() == '.txt':
             file_info.update(analyze_text_file(file_path))
+        elif file_path.suffix.lower() in ['.jpg', '.jpeg', '.png']:
+            file_info.update(analyze_image_file(file_path))  # Analyze image files
         else:
             file_info['type'] = 'text'
             
@@ -378,6 +382,47 @@ def analyze_text_file(file_path: Path) -> Dict[str, Any]:
         }
     except Exception:
         return {'type': 'text', 'structure': {'error': 'Could not parse text file'}}
+
+def analyze_image_file(file_path: Path) -> Dict[str, Any]:
+    """Analyze image file structure and metadata."""
+    try:
+        from PIL import Image
+        import os
+        
+        # Get file size
+        file_size = os.path.getsize(file_path)
+        file_size_mb = file_size / (1024 * 1024)
+        
+        # Open and analyze the image
+        with Image.open(file_path) as img:
+            width, height = img.size
+            mode = img.mode
+            format_name = img.format
+            
+            # Get basic image info
+            structure = {
+                'format': format_name,
+                'width': width,
+                'height': height,
+                'mode': mode,
+                'size_mb': round(file_size_mb, 2),
+                'has_exif': False
+            }
+            
+            # Check for EXIF data
+            if hasattr(img, '_getexif') and img._getexif():
+                structure['has_exif'] = True
+            
+            return {
+                'type': 'image',
+                'structure': structure
+            }
+            
+    except Exception as e:
+        return {
+            'type': 'image',
+            'structure': {'error': f'Could not process image: {str(e)}'}
+        }
 
 def create_code_file(code: str, sandbox_path: Path) -> Path:
     """
@@ -573,6 +618,17 @@ def validate_generated_code(code: str) -> Tuple[bool, str]:
         'from io',
         'import pathlib',
         'import io',
+        'import duckdb',
+        'from duckdb',
+        'duckdb.connect',
+        'conn.execute',
+        's3://',
+        'read_parquet',
+        'install httpfs',
+        'load httpfs',
+        'install parquet',
+        'load parquet',
+        's3_region',
         'open(',  # Allow file operations
         'with open(',  # Allow file operations
         '.read(',
@@ -671,6 +727,18 @@ def infer_task_type(question_text: str) -> str:
         "decomposition", "stationarity", "differencing"
     ]
     
+    database_keywords = [
+        "duckdb", "sql", "query", "database", "s3://", "bucket", "parquet",
+        "install httpfs", "load httpfs", "read_parquet", "s3_region",
+        "judgments", "judgement", "metadata", "count(*)", "select",
+        "from", "where", "group by", "order by", "join", "union"
+    ]
+    
+    image_keywords = [
+        "image", "photo", "picture", "attached image", "visual", "analyze image",
+        "vision", "ocr", "text extraction", "image analysis", "jpg", "png", "jpeg"
+    ]
+    
     scrape_keywords = [
         "scrape", "website", "html", "web", "crawl", "extract", "parse",
         "beautifulsoup", "requests", "url", "http", "tag", "element",
@@ -682,6 +750,8 @@ def infer_task_type(question_text: str) -> str:
         "graph": sum(1 for keyword in graph_keywords if keyword in text_lower),
         "statistical": sum(1 for keyword in statistical_keywords if keyword in text_lower),
         "timeseries": sum(1 for keyword in timeseries_keywords if keyword in text_lower),
+        "database": sum(1 for keyword in database_keywords if keyword in text_lower),
+        "image": sum(1 for keyword in image_keywords if keyword in text_lower),
         "scrape": sum(1 for keyword in scrape_keywords if keyword in text_lower)
     }
     

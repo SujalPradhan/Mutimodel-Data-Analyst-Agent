@@ -8,7 +8,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     DEBIAN_FRONTEND=noninteractive
 
-# Install system dependencies required for data science packages
+# Install system dependencies required for data science packages, DuckDB, and image processing
 RUN apt-get update && apt-get install -y \
     gcc \
     g++ \
@@ -19,6 +19,15 @@ RUN apt-get update && apt-get install -y \
     libpng-dev \
     libjpeg-dev \
     pkg-config \
+    sqlite3 \
+    libsqlite3-dev \
+    curl \
+    unzip \
+    ca-certificates \
+    libssl-dev \
+    libcurl4-openssl-dev \
+    tesseract-ocr \
+    tesseract-ocr-eng \
     && rm -rf /var/lib/apt/lists/*
 
 # Create working directory
@@ -34,6 +43,9 @@ RUN useradd -m -u 1000 analysis \
     && chown -R analysis:analysis /workspace
 
 USER analysis
+
+# Pre-install DuckDB extensions for the analysis user
+RUN python -c "import duckdb; conn = duckdb.connect(); conn.execute('INSTALL httpfs'); conn.execute('INSTALL parquet'); conn.execute('INSTALL json'); conn.execute('INSTALL fts'); conn.close()" || echo "Extension installation will be handled at runtime"
 
 # Default command
 CMD ["python"]
