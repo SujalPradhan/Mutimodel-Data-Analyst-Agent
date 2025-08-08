@@ -3,7 +3,7 @@ description: "Sample evaluation – network dataset"
 providers:
   - id: https
     config:
-      url: https://app.example.com/api/ # Replace with your API endpoint
+      url: http://localhost:8000/api/ # Replace with your API endpoint
       method: POST
       body: file://question.txt
       transformResponse: json

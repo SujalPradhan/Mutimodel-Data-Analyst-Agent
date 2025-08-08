@@ -167,7 +167,7 @@ You can use these files directly in your analysis instead of scraping again.
 """
     
     prompt = f"""
-You are a data analysis expert. Generate Python code to answer the user's question about the uploaded data files.
+You are an expert data analyst. Generate Python code to answer the user's question using the provided data files.
 
 **USER QUESTION:** {question}
 
@@ -179,48 +179,104 @@ You are a data analysis expert. Generate Python code to answer the user's questi
 **FILE SAMPLES:**
 {json.dumps(file_samples, indent=2)}{scraped_context}
 
-**REQUIREMENTS:**
-1. Write complete, executable Python code
-2. Use only these allowed libraries: pandas, numpy, matplotlib, seaborn, plotly, networkx, scipy, json, csv, base64, pathlib, requests, beautifulsoup4
-3. If files named 'scraped_data.csv', 'scraped_data.html' or 'scraped_data.json' exist in the working directory, load data directly from these files instead of performing web scraping. Only perform web scraping using requests and BeautifulSoup when no pre-scraped data file is available.
-4. Read files from the current directory (files are already in the working directory)
-5. Save all results to specific output files:
-   - JSON results: save to 'result.json' as a JSON array with exactly 4 elements: [numeric_answer, string_answer, float_answer, base64_image_string]
-   - **CRITICAL FORMAT REQUIREMENT:** The result.json must contain RAW VALUES ONLY, no descriptive text
-   - Example CORRECT format: [1, "Titanic", 0.49, "data:image/png;base64,iVBORw0KGgo..."]
-   - Example WRONG format: ["Number of movies: 1", "Film name is Titanic", "Correlation is 0.49", ...]
-   - Elements must be: [int/float (just number), str (just text), float (just number), str (base64 image)]
-   - Plots: save as PNG files with base64 encoding under 100KB each
-   - Text output: use print() statements
-6. **IMPORTANT for web scraping tasks when pre-scraped data is not available:** After scraping data from a website, save the scraped data as a file:
-   - Save as CSV if tabular data: 'scraped_data.csv'
-   - Save as JSON if structured data: 'scraped_data.json'
-   - This allows the data to be reused for further analysis steps
-7. Handle errors gracefully with try-except blocks
-8. Include comments explaining the analysis approach
-9. For web scraping tasks, implement proper error handling and retry logic
-10. **HTML ANALYSIS REQUIREMENT:** When performing web scraping, first analyze the entire HTML document structure to understand the page layout. Use soup.prettify()[:2000] or similar to examine the HTML structure, identify all available tables, sections, and data containers before selecting the target elements. This ensures robust element selection and fallback strategies.
+**CORE REQUIREMENTS:**
+
+**1. Data Source Strategy:**
+   - **SQL/DuckDB:** For questions with SQL queries, s3://, database URLs, .parquet/.csv remote files
+   - **Web Scraping:** Only for explicit web content requests (Wikipedia pages, HTML tables)
+   - **Local Files:** Default for uploaded files in current directory
+
+**2. DuckDB Database Operations:**
+   ```python
+   import duckdb
+   conn = duckdb.connect()
+   # Install required extensions
+   conn.execute("INSTALL httpfs; LOAD httpfs;")  # For remote URLs
+   conn.execute("INSTALL parquet; LOAD parquet;")  # For parquet files
+   
+   # Query patterns:
+   result = conn.execute("SELECT * FROM read_parquet('s3://bucket/file.parquet')").fetchdf()
+   result = conn.execute("SELECT * FROM read_csv('https://example.com/data.csv')").fetchdf()
+   conn.close()
+   ```
+   
+   **DuckDB Function Reference:**
+   - ✅ Date differences: `DATE_DIFF('day', date1, date2)` or `DATEDIFF('day', date1, date2)`
+   - ✅ Date arithmetic: `date1 - date2` (for DATE columns)
+   - ✅ Date casting: `column::DATE` or `CAST(column AS DATE)`
+   - ✅ String aggregation: `STRING_AGG(column, ',')`
+   - ❌ Never use SQLite functions: `JULIANDAY()`, `GROUP_CONCAT()`
+   - ❌ Never use MySQL/PostgreSQL specific syntax
+
+**3. Output Format (MANDATORY):**
+   Save exactly 4 elements to 'result.json':
+   ```json
+   [numeric_value, "string_value", float_value, "data:image/png;base64,encoded_image"]
+   ```
+   
+   **Examples:**
+   - ✅ CORRECT: `[42, "Product A", 0.85, "data:image/png;base64,iVBOR..."]`
+   - ❌ WRONG: `["Count: 42", "Top product: Product A", "Correlation: 0.85"]`
+   
+   **Element Guidelines:**
+   - [0]: Raw numeric answer (count, sum, ID, etc.)
+   - [1]: String answer (name, category, description)
+   - [2]: Calculated metric (average, correlation, percentage as decimal)
+   - [3]: Visualization as base64 PNG with full data URI prefix
+
+**4. Analysis Methodology:**
+   ```python
+   # 1. Data Discovery
+   print("Data shape and types:")
+   print(df.info())
+   print("\nFirst few rows:")
+   print(df.head())
+   
+   # 2. Data Quality Check
+   print("\nMissing values:")
+   print(df.isnull().sum())
+   print("\nDuplicates:", df.duplicated().sum())
+   
+   # 3. Analysis Execution
+   # Apply appropriate methods based on question
+   
+   # 4. Visualization Creation
+   # Create relevant plots for the analysis
+   
+   # 5. Results Compilation
+   # Format as 4-element array
+   ```
+
+**5. Error Handling & Robustness:**
+   - Wrap file operations in try-except blocks
+   - Validate data types and handle conversion errors
+   - Check for empty datasets before analysis
+   - Provide fallback values if calculations fail
+   - Use `df.fillna()` or `df.dropna()` for missing data
+   - Handle edge cases (single row, all same values, etc.)
 
 **OUTPUT FORMAT:**
 Your response should contain only Python code between ```python and ``` markers.
 
-**CODE TEMPLATE:**
+**STRUCTURED CODE TEMPLATE:**
+
 ```python
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-import requests
-from bs4 import BeautifulSoup
+import seaborn as sns
 import json
 import base64
 from pathlib import Path
 from io import BytesIO
-import time
+import duckdb
+import requests
+from bs4 import BeautifulSoup
 
-# Set matplotlib to non-interactive backend
+# Configure matplotlib
 plt.switch_backend('Agg')
+plt.style.use('default')
 
-# Custom JSON encoder to handle numpy types
 class NumpyEncoder(json.JSONEncoder):
     def default(self, obj):
         if isinstance(obj, np.integer):
@@ -229,72 +285,203 @@ class NumpyEncoder(json.JSONEncoder):
             return float(obj)
         elif isinstance(obj, np.ndarray):
             return obj.tolist()
-        return super(NumpyEncoder, self).default(obj)
+        return super().default(obj)
+
+def create_visualization(data, title="Analysis Results"):
+    # Create appropriate visualization based on data type and analysis
+    plt.figure(figsize=(10, 6))
+    
+    try:
+        if hasattr(data, 'columns') and len(data.columns) >= 2:
+            numeric_cols = data.select_dtypes(include=[np.number]).columns
+            if len(numeric_cols) >= 2:
+                # Multiple numeric columns - scatter or correlation
+                sns.scatterplot(data=data, x=numeric_cols[0], y=numeric_cols[1])
+                plt.title(f"{{title}}: {{numeric_cols[0]}} vs {{numeric_cols[1]}}")
+            elif len(numeric_cols) == 1:
+                # Single numeric column - histogram
+                data[numeric_cols[0]].hist(bins=20, alpha=0.7)
+                plt.title(f"{{title}}: Distribution of {{numeric_cols[0]}}")
+            else:
+                # Categorical data - bar chart
+                value_counts = data.iloc[:, 0].value_counts().head(10)
+                value_counts.plot(kind='bar')
+                plt.title(f"{{title}}: Count by Category")
+        else:
+            # Simple data - basic plot
+            if hasattr(data, 'plot'):
+                data.plot(kind='bar' if len(data) <= 20 else 'line')
+            else:
+                plt.bar(range(len(data)), data)
+            plt.title(title)
+        
+        plt.xticks(rotation=45)
+        plt.tight_layout()
+        
+    except Exception:
+        # Fallback simple plot
+        plt.plot([1, 2, 3, 4], [1, 4, 2, 3])
+        plt.title(title)
+    
+    # Convert to base64
+    buffer = BytesIO()
+    plt.savefig(buffer, format='png', dpi=100, bbox_inches='tight')
+    buffer.seek(0)
+    image_base64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
+    plt.close()
+    
+    return f"data:image/png;base64,{{image_base64}}"
+
+def safe_convert(value, target_type=float, default=0):
+    # Safely convert values with error handling
+    try:
+        if pd.isna(value):
+            return default
+        return target_type(value)
+    except (ValueError, TypeError):
+        return default
 
 def main():
     try:
-        # Your analysis code here
-        # For web scraping tasks, use requests and BeautifulSoup:
-        # response = requests.get(url, headers={{'User-Agent': 'Mozilla/5.0...'}})
-        # soup = BeautifulSoup(response.content, 'html.parser')
+        question = "{question}"
+        question_lower = question.lower()
         
-        # STEP 1: Analyze HTML structure when scraping
-        # print("HTML Structure Analysis:")
-        # print(soup.prettify()[:2000])  # Print first 2000 chars of HTML
-        # 
-        # # Find all tables and examine their structure
-        # all_tables = soup.find_all('table')
-        # print(f"Found {{len(all_tables)}} tables on the page")
-        # for i, table in enumerate(all_tables):
-        #     table_classes = table.get('class', [])
-        #     print(f"Table {{i}}: classes={{table_classes}}")
-        #     # Check for captions, headers, etc.
-        #     caption = table.find('caption')
-        #     if caption:
-        #         print(f"  Caption: {{caption.get_text(strip=True)[:100]}}...")
+        # STEP 1: DETERMINE DATA SOURCE STRATEGY
+        sql_keywords = ['select', 'from', 'where', 's3://', 'read_parquet', 'read_csv', 
+                       'duckdb', 'install httpfs', '.parquet', 'group by', 'order by']
+        web_keywords = ['wikipedia', 'scrape', 'website', 'html', 'web page', 'url']
         
-        # IMPORTANT: If you scrape data, save it to a file for future use:
-        # For tabular data: df.to_csv('scraped_data.csv', index=False)
-        # For structured data: 
-        # with open('scraped_data.json', 'w') as f:
-        #     json.dump(scraped_data, f, cls=NumpyEncoder)
+        is_sql_query = any(keyword in question_lower for keyword in sql_keywords)
+        is_web_scraping = any(keyword in question_lower for keyword in web_keywords) and not is_sql_query
         
-        # **CRITICAL: Create result array with exactly 4 elements in correct format**
-        # This must be a JSON array with: [numeric_answer, string_answer, float_answer, base64_image_string]
-        # Use ONLY raw values - NO descriptive text or labels
-        # 
-        # Create a simple plot to generate the required base64 image
-        plt.figure(figsize=(8, 6))
-        plt.plot([1, 2, 3, 4], [1, 4, 2, 3])
-        plt.title('Sample Plot')
-        plt.xlabel('X axis')
-        plt.ylabel('Y axis')
+        print(f"Analysis strategy: SQL={{is_sql_query}}, Web={{is_web_scraping}}")
         
-        # Convert plot to base64
-        buffer = BytesIO()
-        plt.savefig(buffer, format='png', dpi=100, bbox_inches='tight')
-        buffer.seek(0)
-        image_base64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
-        plt.close()
+        # STEP 2: DATA ACQUISITION
+        if is_sql_query:
+            # DuckDB approach for SQL queries and remote data
+            print("Using DuckDB for data access...")
+            conn = duckdb.connect()
+            conn.execute("INSTALL httpfs; LOAD httpfs;")
+            conn.execute("INSTALL parquet; LOAD parquet;")
+            
+            # Execute SQL query extracted from question
+            # Replace this with actual SQL from the question:
+            # df = conn.execute("YOUR_SQL_QUERY_HERE").fetchdf()
+            
+            # For template demonstration:
+            df = pd.DataFrame({{'example': [1, 2, 3], 'data': ['A', 'B', 'C']}})
+            conn.close()
+            
+        elif is_web_scraping:
+            # Web scraping approach
+            print("Using web scraping...")
+            headers = {{'User-Agent': 'Mozilla/5.0 (compatible; DataAnalyzer/1.0)'}}
+            
+            # Extract URL from question and scrape
+            # url = "https://example.com"  # Extract from question
+            # response = requests.get(url, headers=headers)
+            # soup = BeautifulSoup(response.content, 'html.parser')
+            
+            # For template:
+            df = pd.DataFrame({{'scraped': [1, 2, 3], 'data': ['X', 'Y', 'Z']}})
+            
+        else:
+            # Local file approach
+            print("Loading local data files...")
+            data_files = list(Path('.').glob('*.csv')) + list(Path('.').glob('*.json'))
+            
+            if data_files:
+                primary_file = data_files[0]
+                if primary_file.suffix == '.csv':
+                    df = pd.read_csv(primary_file)
+                elif primary_file.suffix == '.json':
+                    df = pd.read_json(primary_file)
+                else:
+                    df = pd.read_csv(primary_file)
+            else:
+                # Fallback data
+                df = pd.DataFrame({{'sample': [1, 2, 3, 4, 5], 'values': [10, 20, 15, 25, 30]}})
         
-        # Create result array - REPLACE WITH YOUR ACTUAL VALUES
-        results = [
-            0,  # Replace with your numeric answer (JUST THE NUMBER)
-            "Template Answer",  # Replace with your string answer (JUST THE TEXT, NO LABELS)
-            0.0,  # Replace with your float answer (JUST THE NUMBER)
-            f"data:image/png;base64,{{image_base64}}"  # Base64 image (keep this format)
+        # STEP 3: DATA EXPLORATION
+        print(f"Data shape: {{df.shape}}")
+        print(f"Columns: {{list(df.columns)}}")
+        print("\\nFirst few rows:")
+        print(df.head())
+        
+        # Data quality check
+        missing_count = df.isnull().sum().sum()
+        duplicate_count = df.duplicated().sum()
+        print(f"\\nData quality: {{missing_count}} missing, {{duplicate_count}} duplicates")
+        
+        # STEP 4: ANALYSIS EXECUTION (Customize based on question)
+        numeric_cols = df.select_dtypes(include=[np.number]).columns
+        text_cols = df.select_dtypes(include=['object']).columns
+        
+        # Default analysis patterns:
+        if 'count' in question_lower or 'how many' in question_lower:
+            numeric_result = len(df)
+            string_result = "Total records" if len(df.columns) == 0 else str(df.columns[0])
+            float_result = float(numeric_result)
+            
+        elif ('top' in question_lower or 'maximum' in question_lower or 'highest' in question_lower) and len(numeric_cols) > 0:
+            max_col = numeric_cols[0]
+            max_idx = df[max_col].idxmax()
+            max_row = df.loc[max_idx]
+            
+            numeric_result = safe_convert(max_row[max_col], int, 0)
+            string_result = str(max_row.iloc[0]) if len(text_cols) > 0 else max_col
+            float_result = safe_convert(max_row[max_col], float, 0.0)
+            
+        elif 'correlation' in question_lower and len(numeric_cols) >= 2:
+            corr_matrix = df[numeric_cols].corr()
+            corr_value = corr_matrix.iloc[0, 1]
+            
+            numeric_result = len(numeric_cols)
+            string_result = f"{{numeric_cols[0]}} vs {{numeric_cols[1]}}"
+            float_result = safe_convert(corr_value, float, 0.0)
+            
+        elif ('average' in question_lower or 'mean' in question_lower) and len(numeric_cols) > 0:
+            avg_value = df[numeric_cols[0]].mean()
+            
+            numeric_result = len(df)
+            string_result = numeric_cols[0]
+            float_result = safe_convert(avg_value, float, 0.0)
+            
+        else:
+            # General descriptive analysis
+            numeric_result = len(df)
+            string_result = str(df.columns[0]) if len(df.columns) > 0 else "No data"
+            float_result = safe_convert(df[numeric_cols[0]].mean() if len(numeric_cols) > 0 else 0, float, 0.0)
+        
+        # STEP 5: VISUALIZATION
+        print("\\nCreating visualization...")
+        image_base64 = create_visualization(df, "Analysis Results")
+        
+        # STEP 6: RESULTS COMPILATION
+        final_results = [
+            safe_convert(numeric_result, int, 0),
+            str(string_result),
+            safe_convert(float_result, float, 0.0),
+            image_base64
         ]
         
-        # Save results using custom encoder
+        print(f"Results: [{{final_results[0]}}, '{{final_results[1]}}', {{final_results[2]}}, '<image>']")
+        
+        # Save results
         with open('result.json', 'w') as f:
-            json.dump(results, f, cls=NumpyEncoder)
-            
+            json.dump(final_results, f, cls=NumpyEncoder)
+        
+        print("Analysis completed successfully!")
+        
     except Exception as e:
-        # Error case - still return 4-element array format
-        error_results = [0, "Error", 0.0, "data:image/png;base64,"]
+        print(f"Error: {{e}}")
+        import traceback
+        traceback.print_exc()
+        
+        # Error fallback
+        error_results = [0, f"Error: {{str(e)}}", 0.0, "data:image/png;base64,"]
         with open('result.json', 'w') as f:
             json.dump(error_results, f)
-        print(f"Error: {{e}}")
 
 if __name__ == "__main__":
     main()
@@ -306,46 +493,99 @@ if __name__ == "__main__":
 
 Generate the Python code now:
 """
+
+    # Enhance the prompt with context-specific examples and guidance
+    enhanced_prompt = enhance_prompt_with_context(prompt, question, analysis_type)
     
-    return prompt
+    return enhanced_prompt
 
 def get_analysis_type_guidance(analysis_type: str) -> str:
     """Get specific guidance based on analysis type."""
     guidance = {
         "statistical": """
-- Calculate descriptive statistics (mean, median, std, etc.)
-- Perform correlation analysis if multiple numeric columns
-- Create histograms and box plots
-- Include statistical tests if appropriate
+**STATISTICAL ANALYSIS FOCUS:**
+- Calculate comprehensive descriptive statistics (mean, median, std, quartiles, skewness, kurtosis)
+- Perform correlation analysis for numeric variables (use df.corr())
+- Create distribution plots (histograms, box plots, violin plots)
+- Apply statistical tests when appropriate (t-tests, chi-square, normality tests)
+- Check for outliers using IQR method or z-scores
+- Generate summary statistics tables and interpretation
+
+**Key outputs:** Count of variables, strongest correlation coefficient, primary distribution characteristic
         """,
         
         "network": """
-- Use networkx for graph analysis
-- Calculate network metrics (degree, centrality, clustering)
-- Create network visualizations
-- Identify communities or important nodes
+**NETWORK ANALYSIS FOCUS:**
+- Use networkx library for graph construction and analysis
+- Calculate key network metrics: degree centrality, betweenness centrality, clustering coefficient
+- Identify communities using community detection algorithms
+- Create network visualizations with node sizing based on importance
+- Analyze network properties: diameter, density, average path length
+- Find influential nodes and network components
+
+**Key outputs:** Number of nodes/edges, most central node, average clustering coefficient
         """,
         
         "timeseries": """
-- Parse datetime columns properly
-- Create time series plots
-- Calculate trends and seasonality
-- Use rolling averages and statistics
+**TIME SERIES ANALYSIS FOCUS:**
+- Parse datetime columns using pd.to_datetime() with appropriate format
+- Set datetime as index for time series operations
+- Calculate trends using rolling averages and linear regression
+- Identify seasonality patterns using decomposition
+- Create time series plots with trend lines and seasonal components
+- Calculate year-over-year or period-over-period growth rates
+- Handle missing time periods and irregular intervals
+
+**Key outputs:** Total time periods, strongest trend direction, peak/trough values
         """,
         
         "ml": """
-- Perform data preprocessing (scaling, encoding)
-- Apply appropriate ML techniques (clustering, classification, etc.)
-- Create feature importance plots
-- Calculate performance metrics
+**MACHINE LEARNING ANALYSIS FOCUS:**
+- Perform comprehensive data preprocessing (scaling, encoding, feature selection)
+- Apply appropriate ML techniques: clustering (KMeans), classification, regression
+- Create feature importance plots and correlation matrices
+- Calculate and report performance metrics (accuracy, precision, recall, R²)
+- Use cross-validation for robust model evaluation
+- Visualize decision boundaries or cluster separations
+- Handle categorical variables with proper encoding
+
+**Key outputs:** Number of features, best model performance score, most important feature
+        """,
+        
+        "database": """
+**DATABASE ANALYSIS FOCUS:**
+- Use DuckDB for SQL query execution on local and remote data sources
+- Install and configure necessary extensions (httpfs for S3/HTTP, parquet for .parquet files)
+- Execute complex SQL queries with proper JOIN, GROUP BY, and aggregation functions
+- Handle large datasets efficiently using DuckDB's columnar processing
+- Convert query results to pandas DataFrames for further analysis
+- Implement proper error handling for database connections and queries
+- Use DuckDB-specific functions and avoid SQLite/MySQL syntax differences
+
+**Key outputs:** Query result count, aggregated metric, database connection status
         """,
         
         "general": """
-- Explore data structure and quality
-- Create appropriate visualizations
-- Identify patterns and insights
-- Provide summary statistics
-- **For web scraping tasks:** First analyze the complete HTML structure using soup.prettify() to understand page layout, then identify all available data containers (tables, divs, etc.) before selecting target elements. Implement robust fallback strategies in case primary selectors fail.
+**GENERAL DATA ANALYSIS FOCUS:**
+- **Data Source Strategy:**
+  - **SQL/DuckDB:** Use for database queries, S3/HTTP URLs, .parquet/.csv remote files
+  - **Web Scraping:** Only for explicit HTML content extraction (Wikipedia, web tables)
+  - **Local Files:** Default approach for uploaded CSV/JSON/Parquet files
+  
+- **Analysis Pipeline:**
+  1. Data discovery and quality assessment
+  2. Exploratory data analysis with appropriate visualizations
+  3. Pattern identification and statistical insights
+  4. Meaningful summary and interpretation
+  
+- **Robust Implementation:**
+  - Handle missing data with appropriate strategies (imputation, removal)
+  - Validate data types and perform necessary conversions
+  - Create informative visualizations that match the data characteristics
+  - Provide clear, actionable insights based on the analysis
+  - Ensure output format compliance (4-element JSON array)
+
+**Key outputs:** Dataset size, primary insight, calculated metric
         """
     }
     
@@ -398,102 +638,142 @@ def extract_code_from_response(response_text: str) -> Optional[str]:
     
     return None
 
-
-
-
-
-def get_model_info() -> Dict[str, Any]:
+def get_duckdb_examples_for_question(question: str) -> str:
     """
-    Get information about the configured model.
-    
-    Returns:
-        Dictionary with model information
-    """
-    return {
-        "model_name": MODEL_NAME,
-        "api_key_configured": bool(GEMINI_API_KEY),
-        "generation_config": GENERATION_CONFIG
-    }
-
-async def generate_code_from_prompt(question_text: str, file_list: list[str]) -> str:
-    """
-    Generate Python code from a natural language prompt using Gemini Pro API.
+    Generate relevant DuckDB examples based on question content.
     
     Args:
-        question_text: Natural language task description
-        file_list: List of uploaded file names
+        question: User's question text
         
     Returns:
-        Generated Python code as a string
+        String with relevant DuckDB code examples
     """
-    if not GEMINI_API_KEY:
-        logger.error("GEMINI_API_KEY environment variable not set")
-        return ""
+    question_lower = question.lower()
+    examples = []
     
-    try:
-        # Construct the prompt
-        prompt = _construct_code_generation_prompt(question_text, file_list)
-        
-        # Initialize model
-        model = genai.GenerativeModel(
-            model_name=MODEL_NAME,
-            generation_config=GENERATION_CONFIG,
-            safety_settings=SAFETY_SETTINGS
-        )
-        
-        # Generate response
-        response = await asyncio.to_thread(model.generate_content, prompt)
-        
-        if not response or not response.text:
-            logger.error("Empty response from Gemini API")
-            return ""
-        
-        # Extract Python code from response
-        generated_code = extract_code_from_response(response.text)
-        
-        if not generated_code:
-            logger.error("Could not extract Python code from response")
-            return ""
-        
-        logger.info("Successfully generated Python code from prompt")
-        return generated_code
-        
-    except Exception as e:
-        logger.error(f"Error generating code from prompt: {str(e)}")
-        return ""
+    if 's3://' in question_lower:
+        examples.append("""
+# S3 data access example:
+conn.execute("INSTALL httpfs; LOAD httpfs;")
+df = conn.execute("SELECT * FROM read_parquet('s3://bucket/path/file.parquet?s3_region=us-east-1')").fetchdf()
+""")
+    
+    if 'https://' in question_lower and ('.csv' in question_lower or '.parquet' in question_lower):
+        examples.append("""
+# HTTPS data access example:
+conn.execute("INSTALL httpfs; LOAD httpfs;")
+df = conn.execute("SELECT * FROM read_csv('https://example.com/data.csv')").fetchdf()
+""")
+    
+    if 'date' in question_lower or 'time' in question_lower:
+        examples.append("""
+# Date handling examples:
+# Use DATE_DIFF for date differences:
+SELECT DATE_DIFF('day', start_date, end_date) as days_between FROM table
+# Cast strings to dates:
+SELECT column::DATE as date_col FROM table WHERE date_col > '2023-01-01'::DATE
+""")
+    
+    if 'count' in question_lower or 'group' in question_lower:
+        examples.append("""
+# Aggregation examples:
+SELECT category, COUNT(*) as count, AVG(value) as avg_value 
+FROM table GROUP BY category ORDER BY count DESC
+""")
+    
+    return '\n'.join(examples) if examples else ""
 
-def _construct_code_generation_prompt(question_text: str, file_list: list[str]) -> str:
+def validate_output_format_requirements(question: str, analysis_type: str) -> str:
     """
-    Construct a prompt for code generation.
+    Generate specific output format guidance based on question and analysis type.
     
     Args:
-        question_text: Natural language task description
-        file_list: List of uploaded file names
+        question: User's question text
+        analysis_type: Type of analysis being performed
         
     Returns:
-        Formatted prompt string
+        Specific guidance for output format
     """
-    file_list_str = "\n".join([f"- {filename}" for filename in file_list])
+    question_lower = question.lower()
     
-    prompt = f"""
-You are a Python code generation expert. Generate Python code to solve the following task.
+    numeric_guidance = "Element 1 (numeric): "
+    string_guidance = "Element 2 (string): "
+    float_guidance = "Element 3 (float): "
+    
+    # Customize based on question type
+    if 'count' in question_lower or 'how many' in question_lower:
+        numeric_guidance += "Total count (integer)"
+        string_guidance += "Name of what was counted"
+        float_guidance += "Count as decimal (same as element 1)"
+    elif 'top' in question_lower or 'best' in question_lower or 'maximum' in question_lower:
+        numeric_guidance += "Rank or position (1, 2, 3...)"
+        string_guidance += "Name/identifier of top item"
+        float_guidance += "Value/score of top item"
+    elif 'average' in question_lower or 'mean' in question_lower:
+        numeric_guidance += "Sample size or data points"
+        string_guidance += "Variable name being averaged"
+        float_guidance += "Calculated average value"
+    elif 'correlation' in question_lower or 'relationship' in question_lower:
+        numeric_guidance += "Number of variables analyzed"
+        string_guidance += "Names of correlated variables (e.g., 'A vs B')"
+        float_guidance += "Correlation coefficient (-1.0 to 1.0)"
+    else:
+        # General guidance
+        numeric_guidance += "Primary count/ID/rank (integer)"
+        string_guidance += "Main categorical result/name"
+        float_guidance += "Key calculated metric (ratio/average/score)"
+    
+    return f"""
+**OUTPUT FORMAT SPECIFICATION:**
+{numeric_guidance}
+{string_guidance}
+{float_guidance}
+Element 4 (image): Base64 PNG with prefix "data:image/png;base64,"
 
-**TASK:** {question_text}
-
-**AVAILABLE FILES:**
-{file_list_str}
-
-**INSTRUCTIONS:**
-1. Write complete, executable Python code
-2. Use only standard libraries and common data science libraries (pandas, numpy, matplotlib, seaborn, plotly, scipy, networkx)
-3. Read files from the current directory using the filenames provided above
-4. Include proper error handling with try-except blocks
-5. Save results to appropriate output files (JSON, CSV, or images)
-6. Add comments to explain the approach
-
-**IMPORTANT:** Return ONLY Python code. Do not include explanations, markdown formatting, or any other text. The response should be valid Python code that can be executed directly.
-
-Generate the Python code now:
+**EXAMPLES BY QUESTION TYPE:**
+- Count question: [247, "products", 247.0, "data:image/png;base64,..."]
+- Top item question: [1, "iPhone 14", 999.99, "data:image/png;base64,..."]
+- Average question: [1000, "price", 45.67, "data:image/png;base64,..."]
+- Correlation question: [2, "price vs sales", 0.85, "data:image/png;base64,..."]
 """
+
+def enhance_prompt_with_context(base_prompt: str, question: str, analysis_type: str) -> str:
+    """
+    Enhance the base prompt with context-specific examples and guidance.
     
-    return prompt
+    Args:
+        base_prompt: Base prompt template
+        question: User's question
+        analysis_type: Type of analysis
+        
+    Returns:
+        Enhanced prompt with specific examples
+    """
+    # Add DuckDB examples if relevant
+    duckdb_examples = get_duckdb_examples_for_question(question)
+    if duckdb_examples:
+        duckdb_section = f"\n**RELEVANT DUCKDB EXAMPLES:**{duckdb_examples}\n"
+        base_prompt = base_prompt.replace("**5. Error Handling", duckdb_section + "**5. Error Handling")
+    
+    # Add specific output format guidance
+    output_guidance = validate_output_format_requirements(question, analysis_type)
+    base_prompt = base_prompt.replace("**STRUCTURED CODE TEMPLATE:**", 
+                                      output_guidance + "\n**STRUCTURED CODE TEMPLATE:**")
+    
+    # Add question-specific hints in the code template
+    question_hint = f"# QUESTION ANALYSIS: {question}\n# Focus on: "
+    
+    if 'count' in question.lower():
+        question_hint += "counting and aggregation"
+    elif 'top' in question.lower() or 'best' in question.lower():
+        question_hint += "finding maximum/top values"
+    elif 'correlation' in question.lower():
+        question_hint += "calculating relationships between variables"
+    elif 'trend' in question.lower() or 'change' in question.lower():
+        question_hint += "analyzing trends over time"
+    else:
+        question_hint += "comprehensive data analysis"
+    
+    base_prompt = base_prompt.replace("def main():", f"def main():\n    {question_hint}")
+    
+    return base_prompt

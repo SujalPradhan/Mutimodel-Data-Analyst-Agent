@@ -916,6 +916,12 @@ def pre_scrape_data(question_text: str, sandbox_path: Path) -> list[Path]:
         logger.info("No URLs found in question text")
         return scraped_files
     
+    # Check if this is a SQL/DuckDB query that should use database connections instead of web scraping
+    if detect_sql_database_query(question_text):
+        logger.info("Detected SQL/DuckDB query with database URLs - skipping web scraping")
+        logger.info("URLs will be handled as database connections in the generated code")
+        return scraped_files
+    
     # Extract keywords from question for targeted cleaning
     target_keywords = extract_keywords_from_question(question_text)
     
@@ -1115,3 +1121,90 @@ def extract_keywords_from_question(question_text: str) -> List[str]:
     base_keywords.extend(important_words[:5])  # Add up to 5 important words
     
     return list(set(base_keywords))  # Remove duplicates
+
+def detect_sql_database_query(question_text: str) -> bool:
+    """
+    Detect if the question contains SQL/DuckDB queries with URLs that should be handled
+    as database connections rather than web scraping.
+    
+    Args:
+        question_text: The question text to analyze
+        
+    Returns:
+        True if SQL/DuckDB query detected, False otherwise
+    """
+    # Convert to lowercase for case-insensitive matching
+    text_lower = question_text.lower()
+    
+    # SQL/DuckDB specific patterns
+    sql_patterns = [
+        'select',
+        'from',
+        'where',
+        'group by',
+        'order by',
+        'install',
+        'load',
+        'duckdb',
+        'read_parquet',
+        'read_csv',
+        'read_json',
+        'create table',
+        'insert into',
+        'update',
+        'delete from'
+    ]
+    
+    # Database connection patterns  
+    db_patterns = [
+        's3://',
+        'read_parquet(',
+        'read_csv(',
+        'read_json(',
+        '.parquet',
+        '.csv',
+        '.json',
+        'httpfs',
+        'install httpfs',
+        'load httpfs',
+        's3_region=',
+        'bucket',
+        'aws',
+        'gcs://',
+        'gs://'
+    ]
+    
+    # URL patterns that are likely database sources (not web pages to scrape)
+    database_url_patterns = [
+        's3://[^\\s]+\\.parquet',
+        's3://[^\\s]+\\.csv', 
+        's3://[^\\s]+\\.json',
+        'gs://[^\\s]+\\.parquet',
+        'gs://[^\\s]+\\.csv',
+        'gs://[^\\s]+\\.json',
+        'https?://[^\\s]+\\.parquet',
+        'https?://[^\\s]+\\.csv',
+        'https?://[^\\s]+\\.json'
+    ]
+    
+    # Check for SQL keywords
+    sql_keyword_count = sum(1 for pattern in sql_patterns if pattern in text_lower)
+    
+    # Check for database patterns
+    db_pattern_count = sum(1 for pattern in db_patterns if pattern in text_lower)
+    
+    # Check for database URL patterns using regex
+    import re
+    database_url_matches = any(re.search(pattern, question_text, re.IGNORECASE) for pattern in database_url_patterns)
+    
+    # Decision logic:
+    # - If we have multiple SQL keywords AND database patterns, it's likely a SQL query
+    # - If we have database URL patterns, it's likely a data source rather than web scraping
+    is_sql_query = (
+        (sql_keyword_count >= 2 and db_pattern_count >= 1) or  # Multiple SQL keywords + DB patterns
+        database_url_matches or  # Direct database file URLs
+        ('install httpfs' in text_lower and 'load httpfs' in text_lower) or  # DuckDB setup
+        ('read_parquet' in text_lower and 's3://' in text_lower)  # Direct DuckDB + S3
+    )
+    
+    return is_sql_query

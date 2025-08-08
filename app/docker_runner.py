@@ -1262,6 +1262,18 @@ def check_if_network_needed(code: str) -> bool:
         'html.parser',
         'lxml',
         
+        # DuckDB with network access
+        'duckdb.connect',
+        'install httpfs',
+        'load httpfs',
+        's3://',
+        'gs://',
+        'gcs://',
+        'read_parquet(',
+        'read_csv(',
+        'read_json(',
+        's3_region=',
+        
         # URLs and protocols
         'http://',
         'https://',
@@ -1291,7 +1303,8 @@ def check_if_network_needed(code: str) -> bool:
         'import urllib',
         'from urllib',
         'import http',
-        'from http'
+        'from http',
+        'import duckdb'
     ]
     
     code_lower = code.lower()
