@@ -72,7 +72,7 @@ def create_sandbox_directory(request_id: str) -> Path:
 
 async def save_uploaded_files(files: List[UploadFile], sandbox_path: Path) -> List[Path]:
     """
-    Save uploaded files to the sandbox directory.
+    Save uploaded files to the sandbox directory with smart naming for data files.
     
     Args:
         files: List of uploaded files
@@ -84,8 +84,13 @@ async def save_uploaded_files(files: List[UploadFile], sandbox_path: Path) -> Li
     saved_files = []
     
     for i, file in enumerate(files):
-        # Generate safe filename
-        safe_filename = sanitize_filename(file.filename or f"file_{i}")
+        # Use smart naming for JSON files to ensure consistency
+        if file.filename and file.filename.lower().endswith('.json'):
+            safe_filename = "data.json"  # Standardize JSON file name
+        else:
+            # Generate safe filename for other files
+            safe_filename = sanitize_filename(file.filename or f"file_{i}")
+        
         file_path = sandbox_path / safe_filename
         
         # Save file asynchronously
@@ -286,30 +291,85 @@ def analyze_csv_file(file_path: Path) -> Dict[str, Any]:
         return {'type': 'csv', 'structure': {'error': 'Could not parse CSV'}}
 
 def analyze_json_file(file_path: Path) -> Dict[str, Any]:
-    """Analyze JSON file structure."""
+    """Analyze JSON file structure with enhanced intelligence."""
     try:
         with open(file_path, 'r', encoding='utf-8') as f:
             data = json.load(f)
         
         structure = {
             'data_type': type(data).__name__,
+            'estimated_records': 0,
+            'complexity': 'simple',
+            'nesting_depth': 0,
+            'suggested_analysis': 'general'
         }
+        
+        def calculate_depth(obj, current_depth=0):
+            if isinstance(obj, dict):
+                return max([calculate_depth(v, current_depth + 1) for v in obj.values()] + [current_depth])
+            elif isinstance(obj, list) and obj:
+                return max([calculate_depth(item, current_depth) for item in obj[:5]] + [current_depth])  # Sample first 5
+            return current_depth
         
         if isinstance(data, list):
             structure['length'] = len(data)
+            structure['estimated_records'] = len(data)
             if data:
                 structure['item_type'] = type(data[0]).__name__
                 if isinstance(data[0], dict):
                     structure['keys'] = list(data[0].keys())
+                    structure['nesting_depth'] = calculate_depth(data[0])
+                    
+                    # Determine complexity and suggested analysis
+                    if len(structure['keys']) > 10:
+                        structure['complexity'] = 'complex'
+                    elif structure['nesting_depth'] > 2:
+                        structure['complexity'] = 'nested'
+                    
+                    # Suggest analysis type based on field names
+                    key_names = ' '.join(structure['keys']).lower()
+                    if any(time_word in key_names for time_word in ['date', 'time', 'year', 'month', 'timestamp']):
+                        structure['suggested_analysis'] = 'timeseries'
+                    elif any(stat_word in key_names for stat_word in ['price', 'value', 'amount', 'score', 'rate']):
+                        structure['suggested_analysis'] = 'statistical'
+                    else:
+                        structure['suggested_analysis'] = 'json'
+                        
         elif isinstance(data, dict):
             structure['keys'] = list(data.keys())
+            structure['nesting_depth'] = calculate_depth(data)
+            structure['estimated_records'] = 1
+            
+            # For dictionary data, estimate records from values
+            for key, value in data.items():
+                if isinstance(value, list):
+                    structure['estimated_records'] = max(structure['estimated_records'], len(value))
+                    
+            if structure['nesting_depth'] > 1:
+                structure['complexity'] = 'nested'
+                structure['suggested_analysis'] = 'json'
         
         return {
             'type': 'json',
             'structure': structure
         }
-    except Exception:
-        return {'type': 'json', 'structure': {'error': 'Could not parse JSON'}}
+    except UnicodeDecodeError:
+        # Try different encodings
+        for encoding in ['latin-1', 'cp1252', 'utf-16']:
+            try:
+                with open(file_path, 'r', encoding=encoding) as f:
+                    data = json.load(f)
+                return {
+                    'type': 'json',
+                    'structure': {'encoding_used': encoding, 'data_type': type(data).__name__}
+                }
+            except:
+                continue
+        return {'type': 'json', 'structure': {'error': 'Encoding issues'}}
+    except json.JSONDecodeError as e:
+        return {'type': 'json', 'structure': {'error': f'Invalid JSON: {str(e)}'}}
+    except Exception as e:
+        return {'type': 'json', 'structure': {'error': f'Could not parse JSON: {str(e)}'}}
 
 def analyze_excel_file(file_path: Path) -> Dict[str, Any]:
     """Analyze Excel file structure."""
@@ -1208,3 +1268,69 @@ def detect_sql_database_query(question_text: str) -> bool:
     )
     
     return is_sql_query
+
+def auto_detect_analysis_type(file_paths: List[Path], question: str = "") -> str:
+    """
+    Automatically detect the most appropriate analysis type based on file content and question.
+    
+    Args:
+        file_paths: List of file paths to analyze
+        question: User's question (optional for additional context)
+        
+    Returns:
+        Suggested analysis type
+    """
+    question_lower = question.lower()
+    
+    # Check for explicit analysis type hints in the question
+    if any(word in question_lower for word in ['network', 'graph', 'node', 'edge', 'connection']):
+        return 'network'
+    elif any(word in question_lower for word in ['time', 'trend', 'seasonal', 'forecast', 'over time']):
+        return 'timeseries'
+    elif any(word in question_lower for word in ['cluster', 'classify', 'predict', 'model', 'machine learning']):
+        return 'ml'
+    elif any(word in question_lower for word in ['sql', 'query', 'database', 'select', 'from', 'where']):
+        return 'database'
+    elif any(word in question_lower for word in ['statistical', 'correlation', 'distribution', 'mean', 'median']):
+        return 'statistical'
+    
+    # Analyze file content for hints
+    json_files = [f for f in file_paths if f.suffix.lower() == '.json']
+    
+    if json_files:
+        # Sample first JSON file for structure analysis
+        try:
+            file_analysis = analyze_json_file(json_files[0])
+            structure = file_analysis.get('structure', {})
+            
+            # Use the suggested analysis from structure analysis
+            suggested = structure.get('suggested_analysis', 'json')
+            if suggested != 'general':
+                return suggested
+                
+            # Additional heuristics
+            keys = structure.get('keys', [])
+            if keys:
+                key_text = ' '.join(keys).lower()
+                
+                # Time series indicators
+                if any(time_word in key_text for time_word in ['date', 'time', 'year', 'month', 'timestamp', 'created', 'updated']):
+                    return 'timeseries'
+                
+                # Network indicators  
+                if any(net_word in key_text for net_word in ['source', 'target', 'from', 'to', 'node', 'edge', 'connection']):
+                    return 'network'
+                
+                # Statistical indicators
+                if any(stat_word in key_text for stat_word in ['value', 'score', 'rating', 'price', 'amount', 'quantity']):
+                    return 'statistical'
+            
+            # Complex nested structures suggest JSON-specific analysis
+            if structure.get('complexity') in ['complex', 'nested']:
+                return 'json'
+                
+        except Exception:
+            pass
+    
+    # Default fallback
+    return 'general'

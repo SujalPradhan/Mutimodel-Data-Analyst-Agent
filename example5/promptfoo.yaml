@@ -3,7 +3,7 @@ description: "TDS Data Analyst Agent – generic eval (20-point rubric)"
 providers:
   - id: https
     config:
-      url: https://localhost:8000/api/ # Replace this with your API endpoint
+      url: http://localhost:8000/api/ # Replace this with your API endpoint
       method: POST
       body: file://question.txt
       transformResponse: json

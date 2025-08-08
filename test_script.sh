@@ -241,8 +241,10 @@ main() {
     
     run_test "Example 6 - Legal Data Analysis" \
         'curl -s -X POST "http://localhost:8000/api/" -F "question.txt=@example6/question.txt" -w "\nHTTP Status: %{http_code}\nTime: %{time_total}s\n"'
-
-
+    
+    run_test "Example 5 - Movie Data Analysis" \
+        'curl -X POST "http://localhost:8000/api/"   -F "question=@example6/question.txt"   -F "files=$(cat example6/data.json)"'
+    
     
     # Generate final summary
     echo ""

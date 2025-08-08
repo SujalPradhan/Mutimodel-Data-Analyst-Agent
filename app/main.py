@@ -208,15 +208,21 @@ async def process_files(
         
         logger.info(f"Request {request_uuid}: Question content preview: {question_content[:200]}...")
         
-        # Save other files
+        # Save other files with smart naming for JSON data files
         file_paths = [question_path]  # Start with questions file
         for file in other_files:
-            file_path = sandbox_path / file.filename
+            # Use original filename, but rename JSON files to 'data.json' for consistency
+            if file.filename.lower().endswith('.json'):
+                file_path = sandbox_path / "data.json"
+                logger.info(f"Request {request_uuid}: Renaming JSON file '{file.filename}' to 'data.json' for analysis consistency")
+            else:
+                file_path = sandbox_path / file.filename
+            
             with open(file_path, "wb") as buffer:
                 content = await file.read()
                 buffer.write(content)
             file_paths.append(file_path)
-            logger.info(f"Request {request_uuid}: Saved file: {file.filename}")
+            logger.info(f"Request {request_uuid}: Saved file: {file_path.name}")
         
         # Pre-scrape data based on question URLs before analysis
         scraped_files = pre_scrape_data(question_content, sandbox_path)
@@ -391,13 +397,20 @@ async def analyze_files(
         logger.info(f"Request {request_id}: Saved {len(file_paths)} files to sandbox")
         
         # Analyze file structure for LLM context (includes scraped data if available)
-        from .utils import get_all_available_files
+        from .utils import get_all_available_files, auto_detect_analysis_type
         all_available_files = get_all_available_files(sandbox_path, file_paths)
         file_analysis = analyze_file_structure(all_available_files)
         logger.info(f"Request {request_id}: Analyzed file structure (including any scraped data)")
         
+        # Auto-detect analysis type for JSON files if analysis_type is default
+        if analysis_type == "general":
+            detected_type = auto_detect_analysis_type(all_available_files, question)
+            if detected_type != "general":
+                analysis_type = detected_type
+                logger.info(f"Request {request_id}: Auto-detected analysis type: {analysis_type}")
+        
         # Generate analysis code using LLM
-        logger.info(f"Request {request_id}: Generating analysis code with LLM")
+        logger.info(f"Request {request_id}: Generating analysis code with LLM (type: {analysis_type})")
         generated_code = await generate_analysis_code(
             question=question,
             file_paths=all_available_files,
