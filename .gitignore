@@ -125,7 +125,8 @@ poetry.lock
 # Celery
 celerybeat-schedule
 celerybeat.pid
-
+/example4
+/example5
 # SageMath parsed files
 *.sage.py
 
@@ -143,3 +144,5 @@ celerybeat.pid
 .mypy_cache/
 .dmypy.json
 dmypy.json
+
+

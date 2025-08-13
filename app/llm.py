@@ -287,7 +287,7 @@ The question explicitly specifies a JSON object with these EXACT keys:
 3. ✅ MUST NOT omit any required keys  
 4. ✅ MUST use safe_convert() for all values
 5. ✅ MUST save as JSON object, NOT array
-6. ✅ For base64 images, include full data URI prefix "data:image/png;base64,"
+6. ✅ For base64 images, include ONLY the base64 string (no prefix)
 
 **📋 MANDATORY IMPLEMENTATION TEMPLATE:**
 ```python
@@ -334,7 +334,7 @@ Each element must answer the corresponding numbered question (1, 2, 3, ..., {num
 2. ✅ MUST be a JSON array (list), NOT a JSON object (dict)
 3. ✅ ALL elements MUST be strings (use str() conversion)
 4. ✅ Each element answers the corresponding numbered question
-5. ✅ For base64 images, include full data URI: "data:image/png;base64,..."
+5. ✅ For base64 images, include ONLY the base64 string (no prefix)
 6. ✅ Numeric answers must be converted to strings
 
 **📋 MANDATORY IMPLEMENTATION TEMPLATE:**
@@ -430,7 +430,7 @@ def get_default_value(type_string: str) -> str:
     elif "float" in type_string.lower():
         return "0.0"
     elif "base64" in type_string.lower():
-        return '"data:image/png;base64,"'
+        return '""'  # Empty string for base64 images
     else:
         return '"No data"'
 
@@ -658,7 +658,7 @@ def validate_and_clean_results(results):
         elif i == 2:  # Float result
             cleaned.append(safe_convert(item, float, 0.0))
         elif i == 3:  # Base64 image
-            cleaned.append(str(item) if item else "data:image/png;base64,")
+            cleaned.append(str(item) if item else "")
         else:
             cleaned.append(safe_convert(item, str, ""))
     return cleaned
@@ -694,18 +694,18 @@ def validate_and_clean_results(results):
 **6. Output Format (MANDATORY):**
    Save exactly 4 elements to 'result.json' using the RobustJSONEncoder:
    ```json
-   [numeric_value, "string_value", float_value, "data:image/png;base64,encoded_image"]
+   [numeric_value, "string_value", float_value, "base64_encoded_image"]
    ```
    
    **Examples:**
-   - ✅ CORRECT: `[42, "Product A", 0.85, "data:image/png;base64,iVBOR..."]`
+   - ✅ CORRECT: `[42, "Product A", 0.85, "iVBORw0KGgoAAAANSUhEUgAAAo..."]`
    - ❌ WRONG: `["Count: 42", "Top product: Product A", "Correlation: 0.85"]`
    
    **Element Guidelines:**
    - [0]: Raw numeric answer (count, sum, ID, etc.)
    - [1]: String answer (name, category, description)
    - [2]: Calculated metric (average, correlation, percentage as decimal)
-   - [3]: Visualization as base64 PNG with full data URI prefix
+   - [3]: Visualization as base64 PNG string (just the base64 data, no prefix)
 
 **7. Analysis Methodology:**
    ```python
@@ -840,22 +840,32 @@ def create_visualization(data, title="Analysis Results"):
             if len(numeric_cols) >= 2:
                 # Multiple numeric columns - scatter or correlation
                 sns.scatterplot(data=data, x=numeric_cols[0], y=numeric_cols[1])
+                plt.xlabel(str(numeric_cols[0]))  # MANDATORY: Always label x-axis
+                plt.ylabel(str(numeric_cols[1]))  # MANDATORY: Always label y-axis
                 plt.title(f"{{title}}: {{numeric_cols[0]}} vs {{numeric_cols[1]}}")
             elif len(numeric_cols) == 1:
                 # Single numeric column - histogram
                 data[numeric_cols[0]].hist(bins=20, alpha=0.7)
+                plt.xlabel(str(numeric_cols[0]))  # MANDATORY: Always label x-axis
+                plt.ylabel('Frequency')           # MANDATORY: Always label y-axis
                 plt.title(f"{{title}}: Distribution of {{numeric_cols[0]}}")
             else:
                 # Categorical data - bar chart
                 value_counts = data.iloc[:, 0].value_counts().head(10)
                 value_counts.plot(kind='bar')
+                plt.xlabel(str(data.columns[0]))  # MANDATORY: Always label x-axis
+                plt.ylabel('Count')               # MANDATORY: Always label y-axis
                 plt.title(f"{{title}}: Count by Category")
         else:
             # Simple data - basic plot
             if hasattr(data, 'plot'):
                 data.plot(kind='bar' if len(data) <= 20 else 'line')
+                plt.xlabel('Index')               # MANDATORY: Always label x-axis
+                plt.ylabel('Value')               # MANDATORY: Always label y-axis
             else:
                 plt.bar(range(len(data)), data)
+                plt.xlabel('Index')               # MANDATORY: Always label x-axis
+                plt.ylabel('Value')               # MANDATORY: Always label y-axis
             plt.title(title)
         
         plt.xticks(rotation=45)
@@ -864,6 +874,8 @@ def create_visualization(data, title="Analysis Results"):
     except Exception:
         # Fallback simple plot
         plt.plot([1, 2, 3, 4], [1, 4, 2, 3])
+        plt.xlabel('X-axis')                  # MANDATORY: Always label x-axis
+        plt.ylabel('Y-axis')                  # MANDATORY: Always label y-axis
         plt.title(title)
     
     # Convert to base64
@@ -873,7 +885,7 @@ def create_visualization(data, title="Analysis Results"):
     image_base64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
     plt.close()
     
-    return f"data:image/png;base64,{{image_base64}}"
+    return f"{{image_base64}}"
 
 def safe_convert(value, target_type=float, default=0):
     '''Safely convert values to JSON-serializable types'''
@@ -906,7 +918,7 @@ def validate_and_clean_results(results):
         elif i == 2:  # Float result
             cleaned.append(safe_convert(item, float, 0.0))
         elif i == 3:  # Base64 image
-            cleaned.append(str(item) if item else "data:image/png;base64,")
+            cleaned.append(str(item) if item else "")
         else:
             cleaned.append(safe_convert(item, str, ""))
     return cleaned
@@ -1184,6 +1196,23 @@ def main():
         # Create appropriate visualizations based on question requirements
         print("\\nCreating visualizations...")
         
+        # 🚨 CRITICAL: ALL CHARTS MUST HAVE LABELED AXES
+        # MANDATORY AXIS LABELING REQUIREMENTS:
+        # - Always use plt.xlabel() to label the x-axis with descriptive text
+        # - Always use plt.ylabel() to label the y-axis with descriptive text
+        # - Use clear, meaningful axis labels that describe the data
+        # - Include units when applicable (e.g., "Sales ($)", "Temperature (°C)", "Count", "Percentage (%)")
+        # - For categorical data: xlabel = category name, ylabel = "Count" or metric name
+        # - For time series: xlabel = "Time" or "Date", ylabel = variable name with units
+        # - For correlations: xlabel = first variable name, ylabel = second variable name
+        # - Never leave axes unlabeled - even generic labels like "X-axis", "Y-axis" are better than none
+        # 
+        # CHART-SPECIFIC LABELING EXAMPLES:
+        # - Bar charts: plt.xlabel("Region"), plt.ylabel("Sales ($)")
+        # - Line charts: plt.xlabel("Date"), plt.ylabel("Revenue ($)")
+        # - Histograms: plt.xlabel("Value Range"), plt.ylabel("Frequency")
+        # - Scatter plots: plt.xlabel("Variable 1"), plt.ylabel("Variable 2")
+        
         # Create base visualization - customize based on specific requirements
         plt.figure(figsize=(10, 6))
         
@@ -1191,28 +1220,30 @@ def main():
         if len(numeric_cols) >= 2:
             # Scatter plot for numeric relationships
             plt.scatter(df[numeric_cols[0]], df[numeric_cols[1]], alpha=0.6)
-            plt.xlabel(numeric_cols[0])
-            plt.ylabel(numeric_cols[1])
+            plt.xlabel(numeric_cols[0])  # MANDATORY: Always label x-axis
+            plt.ylabel(numeric_cols[1])  # MANDATORY: Always label y-axis
             plt.title(f"{{numeric_cols[0]}} vs {{numeric_cols[1]}}")
         elif len(numeric_cols) == 1:
             # Histogram for single numeric column
             df[numeric_cols[0]].hist(bins=20, alpha=0.7, color='blue')
-            plt.xlabel(numeric_cols[0])
-            plt.ylabel('Frequency')
+            plt.xlabel(numeric_cols[0])  # MANDATORY: Always label x-axis
+            plt.ylabel('Frequency')     # MANDATORY: Always label y-axis
             plt.title(f"Distribution of {{numeric_cols[0]}}")
         else:
             # Bar chart for categorical data
             if len(text_cols) > 0:
                 value_counts = df[text_cols[0]].value_counts().head(10)
                 value_counts.plot(kind='bar', color='green')
-                plt.xlabel(text_cols[0])
-                plt.ylabel('Count')
+                plt.xlabel(text_cols[0])  # MANDATORY: Always label x-axis
+                plt.ylabel('Count')       # MANDATORY: Always label y-axis
                 plt.title(f"Count by {{text_cols[0]}}")
             else:
                 # Error: Cannot create meaningful visualization without data
                 plt.text(0.5, 0.5, 'No suitable data for visualization', 
                         horizontalalignment='center', verticalalignment='center', 
                         transform=plt.gca().transAxes, fontsize=12)
+                plt.xlabel('X-axis')      # MANDATORY: Even for error cases
+                plt.ylabel('Y-axis')      # MANDATORY: Even for error cases
                 plt.title("No Data Available")
         
         plt.xticks(rotation=45)
@@ -1225,8 +1256,8 @@ def main():
         image_base64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
         plt.close()
         
-        # Create the data URI with proper prefix
-        image_data_uri = f"data:image/png;base64,{{image_base64}}"
+        # Create the base64 image string (no prefix)
+        image_data_uri = f"{{image_base64}}"
         
         # STEP 7: COMPILE RESULTS IN REQUIRED FORMAT
         # 🔒 CRITICAL SECTION - MUST FOLLOW EXACT OUTPUT STRUCTURE FROM QUESTION
@@ -1305,7 +1336,7 @@ def main():
             for i in range(expected_elements):
                 if i == expected_elements - 1 and "visualization" in question_lower:
                     # Last element might be a visualization if mentioned in question
-                    results.append("data:image/png;base64,")  # Will be replaced with actual image
+                    results.append("")  # Will be replaced with actual image
                 else:
                     # Each specific answer must be implemented by the LLM
                     raise ValueError(
@@ -1405,6 +1436,30 @@ if __name__ == "__main__":
     main()
 ```
 
+**COMPREHENSIVE CHART CREATION REQUIREMENTS:**
+
+🎯 **MANDATORY AXIS LABELING FOR ALL CHART TYPES:**
+- **Bar Charts:** plt.xlabel("Category Name"), plt.ylabel("Value/Count/Metric ($)")
+- **Line Charts:** plt.xlabel("Time/Date"), plt.ylabel("Variable Name (units)")  
+- **Scatter Plots:** plt.xlabel("X Variable Name"), plt.ylabel("Y Variable Name")
+- **Histograms:** plt.xlabel("Variable Name"), plt.ylabel("Frequency/Count")
+- **Box Plots:** plt.xlabel("Category"), plt.ylabel("Variable Name (units)")
+- **Heatmaps:** Include axis labels even if using seaborn (plt.xlabel/ylabel still required)
+
+📊 **CHART TYPE REQUIREMENTS:**
+- Always choose appropriate chart types based on data and question
+- Use color specifications when requested (e.g., "blue bars", "red line")
+- Include proper titles that describe what the chart shows
+- Apply plt.tight_layout() to prevent label cutoff
+- Use appropriate figure size: plt.figure(figsize=(10, 6)) or larger for complex charts
+
+⚠️ **CRITICAL CHART VALIDATION:**
+- NEVER create charts without axis labels
+- ALWAYS test that plt.xlabel() and plt.ylabel() are called
+- Include units in parentheses when applicable: "Sales ($)", "Temperature (°C)"
+- For time series, format dates properly and rotate labels if needed
+- Use descriptive titles that explain the visualization
+
 **SPECIFIC GUIDANCE BY ANALYSIS TYPE:**
 
 {get_analysis_type_guidance(analysis_type)}
@@ -1437,6 +1492,14 @@ def get_analysis_type_guidance(analysis_type: str) -> str:
 - Generate summary statistics tables and interpretation
 - **JSON Safety:** Use safe_convert() for all statistical calculations to handle NaN/inf values
 
+**MANDATORY CHART REQUIREMENTS:**
+- ALWAYS use plt.xlabel() with descriptive labels (e.g., "Variable Name", "Sales Amount ($)")
+- ALWAYS use plt.ylabel() with descriptive labels (e.g., "Frequency", "Count", "Probability")
+- Include units in axis labels when applicable (e.g., "Temperature (°C)", "Revenue ($)", "Time (hours)")
+- For histograms: xlabel = variable name, ylabel = "Frequency" or "Count"
+- For scatter plots: xlabel = first variable, ylabel = second variable
+- For box plots: xlabel = category, ylabel = variable name with units
+
 **Key outputs:** Count of variables, strongest correlation coefficient, primary distribution characteristic
         """,
         
@@ -1449,6 +1512,13 @@ def get_analysis_type_guidance(analysis_type: str) -> str:
 - Analyze network properties: diameter, density, average path length
 - Find influential nodes and network components
 - **JSON Safety:** Convert all networkx metrics using safe_convert() as they often return numpy types
+
+**MANDATORY CHART REQUIREMENTS:**
+- For network graphs: xlabel = "X Position", ylabel = "Y Position" (or geographic coordinates if applicable)
+- For degree distribution plots: xlabel = "Degree", ylabel = "Number of Nodes"
+- For centrality plots: xlabel = "Node Index" or "Node Name", ylabel = "Centrality Score"
+- For community plots: xlabel = "Community", ylabel = "Number of Nodes"
+- Always include clear axis labels even for network visualizations
 
 **Key outputs:** Number of nodes/edges, most central node, average clustering coefficient
         """,
@@ -1464,6 +1534,13 @@ def get_analysis_type_guidance(analysis_type: str) -> str:
 - Handle missing time periods and irregular intervals
 - **JSON Safety:** Convert datetime objects to ISO format strings, handle pandas Timestamp objects
 
+**MANDATORY CHART REQUIREMENTS:**
+- For time series plots: xlabel = "Date" or "Time Period", ylabel = variable name with units
+- For trend analysis: xlabel = "Time", ylabel = "Trend Value" or specific metric
+- For seasonal decomposition: xlabel = "Time Period", ylabel = component name (e.g., "Seasonal Component")
+- For autocorrelation plots: xlabel = "Lag", ylabel = "Autocorrelation"
+- Always format time axis labels for readability (e.g., plt.xticks(rotation=45))
+
 **Key outputs:** Total time periods, strongest trend direction, peak/trough values
         """,
         
@@ -1477,6 +1554,13 @@ def get_analysis_type_guidance(analysis_type: str) -> str:
 - Visualize decision boundaries or cluster separations
 - Handle categorical variables with proper encoding
 - **JSON Safety:** All sklearn metrics return numpy types - always use safe_convert()
+
+**MANDATORY CHART REQUIREMENTS:**
+- For feature importance: xlabel = "Features", ylabel = "Importance Score"
+- For clustering plots: xlabel = "First Principal Component" or feature name, ylabel = "Second Principal Component" or feature name
+- For performance metrics: xlabel = "Model", ylabel = "Score" or specific metric name
+- For correlation matrices: xlabel = "Features", ylabel = "Features" (with heatmap)
+- For learning curves: xlabel = "Training Set Size" or "Epochs", ylabel = "Accuracy" or "Loss"
 
 **Key outputs:** Number of features, best model performance score, most important feature
         """,
@@ -1712,7 +1796,7 @@ def validate_output_format_requirements(question: str, analysis_type: str) -> st
 {numeric_guidance}
 {string_guidance}
 {float_guidance}
-Element 4 (image): Base64 PNG with prefix "data:image/png;base64," - ensure it's a string
+Element 4 (image): Base64 PNG string (no prefix) - ensure it's a string
 
 **EXAMPLES WITH JSON SAFETY:**
 - Count: [safe_convert(247, int, 0), safe_convert("products", str, "No data"), safe_convert(247.0, float, 0.0), image_str]

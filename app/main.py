@@ -281,29 +281,45 @@ async def process_files(
         # Calculate total execution time
         total_time = time.time() - start_time
         
-        # Build final response
-        final_response = {
-            "request_id": request_uuid,
-            "status": "success" if execution_result.get("success", False) else "error",
-            "question": question_content,
-            "analysis_type": "general",
-            "files_processed": len(file_paths),
-            "execution_time": total_time,
-            "docker_execution_time": execution_result.get("execution_time", 0),
-            "results": response_data
-        }
+        # Build final response - return analysis JSON directly (matching new format)
+        if execution_result.get("success", False) and response_data.get("json"):
+            # Return the analysis JSON results directly in the response body
+            analysis_results = response_data["json"]
+            
+            # Add image data to the analysis results if images exist
+            if response_data.get("images"):
+                for img in response_data["images"]:
+                    # Find matching key in analysis results that should contain image data
+                    for key, value in analysis_results.items():
+                        if isinstance(value, str) and "base64" in key.lower():
+                            # Update with just the base64 data (no prefix)
+                            if not value:
+                                analysis_results[key] = img['data']
+                        elif isinstance(value, str) and any(chart_type in key.lower() for chart_type in ['chart', 'plot', 'graph', 'histogram']):
+                            # Auto-assign images to chart-related keys (just base64 data)
+                            if not value:
+                                analysis_results[key] = img['data']
+                                break
+            
+            logger.info(f"Request {request_uuid}: Analysis completed successfully in {total_time:.2f}s - returning analysis JSON directly")
+            return JSONResponse(content=analysis_results)
         
-        # Add error information if execution failed
-        if not execution_result.get("success", False):
-            final_response["error"] = execution_result.get("error", "Unknown execution error")
-            final_response["stderr"] = execution_result.get("stderr", "")
-        
-        # Validate response structure before returning
-        validated_response = validate_response_structure(final_response)
-        
-        logger.info(f"Request {request_uuid}: Analysis completed successfully in {total_time:.2f}s")
-        
-        return JSONResponse(content=validated_response)
+        else:
+            # Return error response with metadata when execution fails
+            error_response = {
+                "request_id": request_uuid,
+                "status": "error",
+                "question": question_content,
+                "analysis_type": "general",
+                "files_processed": len(file_paths),
+                "execution_time": total_time,
+                "error": execution_result.get("error", "Analysis execution failed"),
+                "stderr": execution_result.get("stderr", ""),
+                "stdout": execution_result.get("stdout", "")
+            }
+            
+            logger.error(f"Request {request_uuid}: Analysis failed in {total_time:.2f}s")
+            return JSONResponse(content=error_response, status_code=status.HTTP_500_INTERNAL_SERVER_ERROR)
         
     except HTTPException:
         raise
@@ -458,29 +474,45 @@ async def analyze_files(
         # Calculate total execution time
         total_time = time.time() - start_time
         
-        # Build final response
-        final_response = {
-            "request_id": request_id,
-            "status": "success" if execution_result.get("success", False) else "error",
-            "question": question,
-            "analysis_type": analysis_type,
-            "files_processed": len(file_paths),
-            "execution_time": total_time,
-            "docker_execution_time": execution_result.get("execution_time", 0),
-            "results": response_data
-        }
+        # Build final response - return analysis JSON directly
+        if execution_result.get("success", False) and response_data.get("json"):
+            # Return the analysis JSON results directly in the response body
+            analysis_results = response_data["json"]
+            
+            # Add image data to the analysis results if images exist
+            if response_data.get("images"):
+                for img in response_data["images"]:
+                    # Find matching key in analysis results that should contain image data
+                    for key, value in analysis_results.items():
+                        if isinstance(value, str) and "base64" in key.lower():
+                            # Update with just the base64 data (no prefix)
+                            if not value:
+                                analysis_results[key] = img['data']
+                        elif isinstance(value, str) and any(chart_type in key.lower() for chart_type in ['chart', 'plot', 'graph', 'histogram']):
+                            # Auto-assign images to chart-related keys (just base64 data)
+                            if not value:
+                                analysis_results[key] = img['data']
+                                break
+            
+            logger.info(f"Request {request_id}: Analysis completed successfully in {total_time:.2f}s - returning analysis JSON directly")
+            return JSONResponse(content=analysis_results)
         
-        # Add error information if execution failed
-        if not execution_result.get("success", False):
-            final_response["error"] = execution_result.get("error", "Unknown execution error")
-            final_response["stderr"] = execution_result.get("stderr", "")
-        
-        # Validate response structure before returning
-        validated_response = validate_response_structure(final_response)
-        
-        logger.info(f"Request {request_id}: Analysis completed successfully in {total_time:.2f}s")
-        
-        return JSONResponse(content=validated_response)
+        else:
+            # Return error response with metadata when execution fails
+            error_response = {
+                "request_id": request_id,
+                "status": "error",
+                "question": question,
+                "analysis_type": analysis_type,
+                "files_processed": len(file_paths),
+                "execution_time": total_time,
+                "error": execution_result.get("error", "Analysis execution failed"),
+                "stderr": execution_result.get("stderr", ""),
+                "stdout": execution_result.get("stdout", "")
+            }
+            
+            logger.error(f"Request {request_id}: Analysis failed in {total_time:.2f}s")
+            return JSONResponse(content=error_response, status_code=status.HTTP_500_INTERNAL_SERVER_ERROR)
         
     except HTTPException:
         raise

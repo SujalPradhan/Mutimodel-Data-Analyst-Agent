@@ -1,10 +1,16 @@
-Scrape the list of highest grossing films from Wikipedia. It is at the URL:
+Scrape the list of highest grossing films from Wikipedia at:
 https://en.wikipedia.org/wiki/List_of_highest-grossing_films
 
-Answer the following questions and respond with a JSON array of strings containing the answer.
+Using the scraped data and the provided data.csv, return a JSON object with keys:
 
-1. How many $2 bn movies were released before 2000?
-2. Which is the earliest film that grossed over $1.5 bn?
-3. What's the correlation between the Rank and Peak?
-4. Draw a scatterplot of Rank and Peak along with a dotted red regression line through it.
-   Return as a base-64 encoded data URI, `"data:image/png;base64,iVBORw0KG..."` under 100,000 bytes.
+- "movies_over_2bn_before_2000": number of movies grossing over $2 billion released before 2000
+- "earliest_1_5bn_film": title of the earliest film grossing over $1.5 billion
+- "rank_peak_correlation": correlation coefficient between Rank and Peak
+- "rank_peak_scatterplot": base64 PNG data URI of scatterplot of Rank vs Peak with dotted red regression line (under 100,000 bytes)
+- "city_highest_avg_temp": city with the highest average temperature
+- "total_rainfall": total rainfall recorded in all cities combined (number)
+- "cities_over_200_sunny_days": count of cities with more than 200 sunny days per year
+- "temp_rainfall_correlation": correlation coefficient between AvgTemperature_C and TotalRainfall_mm
+- "temp_rainfall_scatterplot": base64 PNG data URI of scatterplot AvgTemperature_C vs TotalRainfall_mm with dotted red regression line (under 100,000 bytes)
+
+Answer these questions and return the results in that JSON object format.
